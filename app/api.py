@@ -1,8 +1,10 @@
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import os
+from pathlib import Path
+import logging
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 
 from agents.creative_director import CreativeDirectorAgent
@@ -12,6 +14,9 @@ from agents.qc_agent import QualityControlAgent
 from agents.reviewer_agent import ReviewerAgent
 import fibo.fibo_builder as fibo_builder  # module with shot_to_fibo_json
 from fibo.image_generator_bria import FIBOBriaImageGenerator
+from video.svd_renderer import render_mv_from_plan
+
+logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------------
 # Environment / API key setup
@@ -40,13 +45,30 @@ continuity_agent = ContinuityAgent()
 qc_agent = QualityControlAgent()
 reviewer_agent = ReviewerAgent()
 
-# fibo_builder is the imported module (fibo.fibo_builder) with shot_to_fibo_json
-fibo_image_generator = FIBOBriaImageGenerator(api_key=BRIA_API_KEY, output_dir="generated")
+ROOT = Path(__file__).resolve().parents[1]
+GENERATED_DIR = ROOT / "generated"
+GENERATED_DIR.mkdir(exist_ok=True, parents=True)
 
+# fibo_builder is the imported module (fibo.fibo_builder) with shot_to_fibo_json
+fibo_image_generator = FIBOBriaImageGenerator(
+    api_key=BRIA_API_KEY,
+    output_dir=str(GENERATED_DIR),
+)
 
 class ScriptRequest(BaseModel):
     script_text: str
 
+
+class RenderMVRequest(BaseModel):
+    # Path to mv_video_plan.json relative to project root.
+    # Default matches your Streamlit export location.
+    plan_path: str = "generated/mv_video_plan.json"
+
+
+class RenderMVResponse(BaseModel):
+    status: str
+    message: str
+    result: Optional[Dict[str, Any]] = None
 
 # -------------------------------------------------------------------------
 # Health check
@@ -245,3 +267,47 @@ def full_pipeline_generate_images(req: ScriptRequest) -> Dict[str, Any]:
         "fibo_payloads": fibo_payloads,
         "generated_images": image_results,
     }
+    
+    
+    
+@app.post("/render-mv", response_model=RenderMVResponse)
+def render_mv_endpoint(
+    req: RenderMVRequest,
+    background_tasks: BackgroundTasks,
+) -> RenderMVResponse:
+    """
+    Trigger music video rendering from mv_video_plan.json.
+
+    This will:
+      - Load the plan JSON (script→shots→images→mv_video_plan.json)
+      - Render per-shot clips with Stable Video Diffusion
+      - Concatenate them into generated/final_music_video.mp4
+
+    The heavy work runs in a background task so the request returns quickly.
+    """
+    plan_path = ROOT / req.plan_path
+
+    if not plan_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Video plan file not found at {plan_path}",
+        )
+
+    def _do_render():
+        try:
+            logger.info("Starting MV rendering job...")
+            result = render_mv_from_plan(plan_path, GENERATED_DIR)
+            logger.info(f"MV rendering completed: {result}")
+        except Exception as e:
+            logger.exception(f"Error in MV rendering background task: {e}")
+
+    background_tasks.add_task(_do_render)
+
+    return RenderMVResponse(
+        status="started",
+        message=(
+            "Music video rendering started on backend. "
+            "Refresh the Streamlit UI after some time to see clips and the final MV."
+        ),
+        result=None,
+    )
