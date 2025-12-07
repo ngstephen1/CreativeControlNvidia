@@ -2,7 +2,7 @@ from typing import Any, Dict, List, Optional
 import os
 from pathlib import Path
 import logging
-
+from fastapi import FastAPI, HTTPException
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
@@ -15,7 +15,8 @@ from agents.reviewer_agent import ReviewerAgent
 import fibo.fibo_builder as fibo_builder  # module with shot_to_fibo_json
 from fibo.image_generator_bria import FIBOBriaImageGenerator
 from video.svd_renderer import render_mv_from_plan
-
+from video.video_backend import render_music_video_with_pika
+from video.video_backend import render_music_video
 logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------------
@@ -70,10 +71,17 @@ class RenderMVResponse(BaseModel):
     message: str
     result: Optional[Dict[str, Any]] = None
 
+class RenderMVFromPlanRequest(BaseModel):
+    plan: Dict[str, Any]
+
+class RenderMVFromPlanResponse(BaseModel):
+    status: str
+    message: str
+    mv_url: Optional[str] = None
+    clips: Optional[List[Dict[str, Any]]] = None
 # -------------------------------------------------------------------------
 # Health check
 # -------------------------------------------------------------------------
-
 
 @app.get("/health")
 def health() -> Dict[str, str]:
@@ -310,4 +318,26 @@ def render_mv_endpoint(
             "Refresh the Streamlit UI after some time to see clips and the final MV."
         ),
         result=None,
+    )
+    
+@app.post("/render-mv-json", response_model=RenderMVFromPlanResponse)
+def render_mv_from_plan_endpoint(req: RenderMVFromPlanRequest) -> RenderMVFromPlanResponse:
+    """
+    Accept an mv_video_plan dict and delegate to the external video backend
+    (Pika, Runway, fal.ai, etc.) via video_backend.render_music_video(...).
+
+    The backend is expected to return a final MV URL and optionally per-shot
+    clip URLs.
+    """
+    try:
+        result = render_music_video(req.plan)
+    except Exception as e:
+        # Wrap any unexpected error from the video backend
+        raise HTTPException(status_code=500, detail=f"Video backend error: {e}")
+
+    return RenderMVFromPlanResponse(
+        status=result.get("status", "done"),
+        message=result.get("message", "Music video rendered."),
+        mv_url=result.get("mv_url"),
+        clips=result.get("clips"),
     )
