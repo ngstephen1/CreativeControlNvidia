@@ -1,0 +1,64 @@
+{
+  "project_type": "music_video",
+  "video_backend": "svd",
+  "created_at": "2025-12-07T16:18:28.177446Z",
+  "total_shots": 7,
+  "shots": [
+    {
+      "scene": 1,
+      "shot_id": "S1_SHOT1",
+      "description": "Night rain on the city. A single violinist plays under a street lamp while cars pass in the distance.",
+      "duration_sec": 4.0,
+      "motion_style": "slow_cinematic_push_in",
+      "image_path": "generated/fibo_5d8dd7901cfc48f8aace555065f2c51f.png"
+    },
+    {
+      "scene": 2,
+      "shot_id": "S2_SHOT2",
+      "description": "Closer shot of the violinist\u2019s face, eyes closed, raindrops on the instrument, soft neon reflections in the puddles.",
+      "duration_sec": 4.0,
+      "motion_style": "slow_cinematic_push_in",
+      "image_path": "generated/fibo_0106fc4e040b4a198872d394168c4bce.png"
+    },
+    {
+      "scene": 3,
+      "shot_id": "S3_SHOT3",
+      "description": "The next morning, the violinist rides a tram through the city, watching the world pass by the window in slow motion.",
+      "duration_sec": 4.0,
+      "motion_style": "slow_cinematic_push_in",
+      "image_path": "generated/fibo_1a098588052840beb78198339e4e7957.png"
+    },
+    {
+      "scene": 4,
+      "shot_id": "S4_SHOT4",
+      "description": "Inside a quiet cafe, the violinist sits by the window, notebook open, sketching music ideas on paper.",
+      "duration_sec": 4.0,
+      "motion_style": "slow_cinematic_push_in",
+      "image_path": "generated/fibo_8ddd70b8b8114502b8f7e50f8f4ed7e1.png"
+    },
+    {
+      "scene": 5,
+      "shot_id": "S5_SHOT5",
+      "description": "Evening rooftop performance with a small crowd gathered, string lights overhead, city skyline in the background.",
+      "duration_sec": 4.0,
+      "motion_style": "slow_cinematic_push_in",
+      "image_path": "generated/fibo_7499d06508744bab9a70d0502ab5067d.png"
+    },
+    {
+      "scene": 6,
+      "shot_id": "S6_SHOT6",
+      "description": "Montage of hands on strings, city lights blurring in bokeh, silhouettes walking in the rain, and the violinist smiling at the camera.",
+      "duration_sec": 4.0,
+      "motion_style": "slow_cinematic_push_in",
+      "image_path": "generated/fibo_3bbc8c4ccd044848bccd4f411407c0eb.png"
+    },
+    {
+      "scene": 7,
+      "shot_id": "S7_SHOT7",
+      "description": "Final wide shot of the city at blue hour, the violinist standing on a bridge, music echoing as cars stream by in light trails.",
+      "duration_sec": 4.0,
+      "motion_style": "slow_cinematic_push_in",
+      "image_path": "generated/fibo_88ca30d1a12845c69ccf62c47a0a1428.png"
+    }
+  ]
+}

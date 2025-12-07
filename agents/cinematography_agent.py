@@ -9,16 +9,62 @@ class CinematographyAgent:
     camera + lighting parameters.
 
     For now this is rule-based (no LLM), so it runs fast on CPU.
+
+    It is also aware of basic music video semantics:
+      - If the shot already has a `motion_style` from the Creative Director,
+        we may refine it based on camera intent and environment.
+      - If it does NOT have `motion_style`, we will set a sensible default.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         # You can store global defaults or presets here if needed
         self.default_iso = 400
+
+    def _infer_motion_style(self, shot: Dict) -> str:
+        """
+        Infer or refine a motion_style hint for downstream image→video backends
+        based on camera intent, camera angle, and environment.
+
+        Examples:
+          - establishing / wide city → slow_dolly_out
+          - intimate close-up → handheld_drift
+          - performance / stage → orbital_around_subject
+        """
+        description = shot.get("description", "").lower()
+        camera_intent = shot.get("camera_intent", "").lower()
+        environment = shot.get("environment", {})
+        setting = str(environment.get("setting", "")).lower()
+
+        # If the Creative Director has already suggested something, take it
+        # as the starting point.
+        base_motion = shot.get("motion_style", "").strip()
+
+        # Strong, specific overrides first
+        if "stage" in setting or "concert" in setting:
+            return "orbital_around_subject"
+        if "crowd" in description or "dance" in description:
+            return "handheld_drift"
+
+        # Camera-intent based mapping
+        if "establishing" in camera_intent or "wide" in camera_intent:
+            return "slow_dolly_out"
+        if "close-up" in camera_intent or "closeup" in camera_intent:
+            return "handheld_drift"
+        if "over-the-shoulder" in camera_intent:
+            return "handheld_drift"
+
+        # Fallback if we already had something reasonable
+        if base_motion:
+            return base_motion
+
+        # Safe default
+        return "slow_cinematic_push_in"
 
     def enrich_shot(self, shot: Dict) -> Dict:
         """
         Given a single shot dict, add 'camera' and 'lighting' fields
-        based on the shot description and camera_intent.
+        based on the shot description and camera_intent, and refine
+        `motion_style` for music-video–aware image→video rendering.
         """
         description = shot.get("description", "").lower()
         camera_intent = shot.get("camera_intent", "").lower()
@@ -88,6 +134,9 @@ class CinematographyAgent:
         # Attach to shot
         shot["camera"] = camera
         shot["lighting"] = lighting
+
+        # --- Music-video motion refinement ---
+        shot["motion_style"] = self._infer_motion_style(shot)
 
         return shot
 

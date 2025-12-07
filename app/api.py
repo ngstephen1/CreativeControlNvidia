@@ -1,6 +1,6 @@
 from typing import Any, Dict, List
-
 import os
+
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -10,7 +10,7 @@ from agents.cinematography_agent import CinematographyAgent
 from agents.continuity_agent import ContinuityAgent
 from agents.qc_agent import QualityControlAgent
 from agents.reviewer_agent import ReviewerAgent
-from fibo.builder import FIBOSceneBuilder
+import fibo.fibo_builder as fibo_builder  # module with shot_to_fibo_json
 from fibo.image_generator_bria import FIBOBriaImageGenerator
 
 # -------------------------------------------------------------------------
@@ -18,11 +18,14 @@ from fibo.image_generator_bria import FIBOBriaImageGenerator
 # -------------------------------------------------------------------------
 
 load_dotenv()
-BRIA_API_KEY = os.getenv("BRIA_API_KEY")
+
+# Prefer BRIA_API_TOKEN, but fall back to BRIA_API_KEY for backwards compat
+BRIA_API_KEY = os.getenv("BRIA_API_TOKEN") or os.getenv("BRIA_API_KEY")
 
 if not BRIA_API_KEY:
     raise RuntimeError(
-        "BRIA_API_KEY is not set. Please add it to your .env file or environment."
+        "BRIA_API_TOKEN / BRIA_API_KEY is not set. "
+        "Please add it to your .env file or environment."
     )
 
 # -------------------------------------------------------------------------
@@ -36,7 +39,8 @@ cinematography_agent = CinematographyAgent()
 continuity_agent = ContinuityAgent()
 qc_agent = QualityControlAgent()
 reviewer_agent = ReviewerAgent()
-fibo_builder = FIBOSceneBuilder()
+
+# fibo_builder is the imported module (fibo.fibo_builder) with shot_to_fibo_json
 fibo_image_generator = FIBOBriaImageGenerator(api_key=BRIA_API_KEY, output_dir="generated")
 
 
@@ -134,7 +138,7 @@ def full_pipeline_fibo_json(req: ScriptRequest) -> Dict[str, Any]:
     3. ContinuityAgent        -> enforce character & scene consistency
     4. QualityControlAgent    -> generate QC report
     5. ReviewerAgent          -> wrap report into review summary
-    6. FIBOSceneBuilder       -> map each shot to FIBO-style JSON payload
+    6. fibo.fibo_builder      -> map each shot to FIBO-style JSON payload
     """
     # 1) shot breakdown
     shots_step1 = creative_director.script_to_shots(req.script_text)
@@ -152,7 +156,7 @@ def full_pipeline_fibo_json(req: ScriptRequest) -> Dict[str, Any]:
     review = reviewer_agent.review(shots_step3, qc_report)
 
     # 6) build FIBO JSON payloads-per-shot
-    fibo_payloads = []
+    fibo_payloads: List[Dict[str, Any]] = []
     for shot in shots_step3:
         fibo_payloads.append(
             {
@@ -220,7 +224,8 @@ def full_pipeline_generate_images(req: ScriptRequest) -> Dict[str, Any]:
         except Exception as exc:  # pragma: no cover - broad to surface API errors
             raise HTTPException(
                 status_code=502,
-                detail=f"Error generating image for shot {shot.get('shot_id', 'UNKNOWN')}: {exc}",
+                detail=f"Error generating image for shot "
+                f"{shot.get('shot_id', 'UNKNOWN')}: {exc}",
             ) from exc
 
         image_results.append(

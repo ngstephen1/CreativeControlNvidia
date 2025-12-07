@@ -3,6 +3,8 @@ import sys
 import copy
 import base64
 import io
+import json
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from datetime import datetime
@@ -142,7 +144,10 @@ def run_full_pipeline(script_text: str) -> Dict[str, Any]:
     image_results: List[Dict[str, Any]] = []
 
     for shot in shots_step3:
-        fibo_json = fibo_builder.shot_to_fibo_json(shot)
+        # Use new fallback for sh_to_fibo_json if available
+        fibo_json = fibo_builder.sh_to_fibo_json(shot) if hasattr(
+            fibo_builder, "sh_to_fibo_json"
+        ) else fibo_builder.shot_to_fibo_json(shot)
         fibo_payloads.append(
             {
                 "shot_id": shot.get("shot_id", "UNKNOWN"),
@@ -170,6 +175,41 @@ def run_full_pipeline(script_text: str) -> Dict[str, Any]:
 
 
 # -------------------------------------------------
+# Video plan builder (for music video export)
+# -------------------------------------------------
+def build_video_plan(result: Dict[str, Any], video_backend: str) -> Dict[str, Any]:
+    """
+    Build a JSON-serializable plan that describes which storyboard frames
+    should become which video clips. This is meant to be consumed by a
+    Colab notebook or external service (e.g. Stable Video Diffusion, Pika,
+    Runway) for image→video or text→video generation.
+    """
+    shots: List[Dict[str, Any]] = result.get("shots", [])
+    images: List[Dict[str, Any]] = result.get("generated_images", [])
+
+    shot_entries: List[Dict[str, Any]] = []
+    for shot, img_meta in zip(shots, images):
+        shot_entries.append(
+            {
+                "scene": shot.get("scene"),
+                "shot_id": shot.get("shot_id"),
+                "description": shot.get("description"),
+                "duration_sec": float(shot.get("duration_sec", 4.0)),
+                "motion_style": shot.get("motion_style", "slow_cinematic_push_in"),
+                "image_path": img_meta.get("image_path"),
+            }
+        )
+
+    return {
+        "project_type": "music_video",
+        "video_backend": video_backend,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "total_shots": len(shot_entries),
+        "shots": shot_entries,
+    }
+
+
+# -------------------------------------------------
 # Streamlit UI
 # -------------------------------------------------
 def main() -> None:
@@ -179,7 +219,7 @@ def main() -> None:
     )
 
     st.title("🎬 Autonomous Studio Director")
-    st.caption("JSON-native FIBO storyboard generator (Bria)")
+    st.caption("JSON-native FIBO storyboard generator (Bria) + Music Video export")
 
     col_left, col_right = st.columns([2, 1], gap="large")
 
@@ -206,6 +246,21 @@ def main() -> None:
             "- Calls Bria FIBO via **structured_prompt**\n"
             "- Saves frames to `generated/` folder\n"
         )
+
+        # Video backend selection (for mv_video_plan)
+        backend_label_map = {
+            "Stable Video Diffusion (SVD – open-source, Colab-friendly)": "svd",
+            "Pika (cinematic API)": "pika",
+            "Runway Gen-2 (API)": "runway",
+        }
+        default_backend_label = "Stable Video Diffusion (SVD – open-source, Colab-friendly)"
+        selected_backend_label = st.selectbox(
+            "Video backend for image→video (used in export plan):",
+            list(backend_label_map.keys()),
+            index=list(backend_label_map.keys()).index(default_backend_label),
+        )
+        video_backend_value = backend_label_map[selected_backend_label]
+        st.session_state["video_backend"] = video_backend_value
 
         if "last_run_summary" in st.session_state:
             st.markdown("**Last run:**")
@@ -284,6 +339,44 @@ def main() -> None:
             st.markdown("**Environment**")
             st.json(shot.get("environment", {}))
 
+            # 🎵 Music Video settings per shot (duration & motion style)
+            with st.expander("🎵 Music Video Settings"):
+                current_duration = float(shot.get("duration_sec", 4.0))
+                current_motion = shot.get(
+                    "motion_style", "slow_cinematic_push_in"
+                )
+
+                new_duration = st.slider(
+                    "Shot duration (seconds)",
+                    min_value=1.0,
+                    max_value=12.0,
+                    value=current_duration,
+                    step=0.5,
+                    key=f"dur_{shot_id}",
+                )
+
+                new_motion = st.selectbox(
+                    "Motion style (hint for image→video backend)",
+                    [
+                        "slow_cinematic_push_in",
+                        "slow_dolly_out",
+                        "handheld_drift",
+                        "orbital_around_subject",
+                        "static_camera_subtle_motion",
+                    ],
+                    index=0,
+                    key=f"motion_{shot_id}",
+                )
+
+                # Persist back into shot dict (so export + QC see updated values)
+                shot["duration_sec"] = new_duration
+                shot["motion_style"] = new_motion
+
+                st.caption(
+                    "These values will be embedded in mv_video_plan.json "
+                    "for Colab / Pika / Runway."
+                )
+
             with st.expander("FIBO StructuredPrompt JSON (original)"):
                 st.json(fibo_payload["fibo_json"])
 
@@ -299,10 +392,17 @@ def main() -> None:
                         "mood_atmosphere", "cinematic, contemplative atmosphere"
                     )
                     current_colors = aesth.get(
-                        "color_scheme", "cool blues and purples with warm highlights from artificial lights"
+                        "color_scheme",
+                        "cool blues and purples with warm highlights from artificial lights",
                     )
 
-                    angle_options = ["eye-level", "high", "low", "bird's-eye", "worm's-eye"]
+                    angle_options = [
+                        "eye-level",
+                        "high",
+                        "low",
+                        "bird's-eye",
+                        "worm's-eye",
+                    ]
                     angle_index = (
                         angle_options.index(current_angle)
                         if current_angle in angle_options
@@ -351,8 +451,10 @@ def main() -> None:
                         ] = new_mood
                         modified_fibo["aesthetics"]["color_scheme"] = new_colors
 
-                        new_img_path = fibo_image_generator.generate_image_from_fibo_json(
-                            modified_fibo
+                        new_img_path = (
+                            fibo_image_generator.generate_image_from_fibo_json(
+                                modified_fibo
+                            )
                         )
 
                     st.success("Shot re-generated!")
@@ -386,10 +488,34 @@ def main() -> None:
     st.json(result["review"])
 
     # -------------------------------------------------
+    # Music Video export: mv_video_plan.json
+    # -------------------------------------------------
+    st.markdown("---")
+    st.subheader("🎵 Music Video Export")
+
+    video_backend = st.session_state.get("video_backend", "svd")
+    video_plan = build_video_plan(result, video_backend)
+    json_bytes = json.dumps(video_plan, indent=2).encode("utf-8")
+
+    st.download_button(
+        "⬇️ Download mv_video_plan.json",
+        data=json_bytes,
+        file_name="mv_video_plan.json",
+        mime="application/json",
+    )
+    st.caption(
+        "Use this JSON in a Colab notebook or external pipeline to turn "
+        "keyframes into music video clips using Stable Video Diffusion, Pika, "
+        "Runway, or any other backend."
+    )
+
+    # -------------------------------------------------
     # Shot Asset Lab – RMBG, enhance, background variants
     # -------------------------------------------------
     st.markdown("---")
-    st.subheader("🧪 Shot Asset Lab – foreground cut-out, enhance & background variants")
+    st.subheader(
+        "🧪 Shot Asset Lab – foreground cut-out, enhance, background variants & asset pack"
+    )
 
     if not shot_id_to_image_path:
         st.info("Generate a storyboard first to use the Shot Asset Lab.")
@@ -506,6 +632,58 @@ def main() -> None:
                             use_container_width=True,
                             caption=Path(vp).name,
                         )
+
+        # Per-shot asset pack download (ZIP with original, cut-out, enhanced, variants, metadata)
+        if st.button("📦 Download shot asset pack (ZIP)", key="btn_zip_assets"):
+            base_for_pack = enhanced_path or cutout_path or selected_image_path
+            if not base_for_pack:
+                st.error("No image available to pack.")
+            else:
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                    # Original
+                    if os.path.exists(selected_image_path):
+                        zf.write(
+                            selected_image_path,
+                            arcname="original_frame.png",
+                        )
+                    # Foreground (enhanced or raw cut-out)
+                    if enhanced_path and os.path.exists(enhanced_path):
+                        zf.write(
+                            enhanced_path,
+                            arcname="foreground_enhanced.png",
+                        )
+                    elif cutout_path and os.path.exists(cutout_path):
+                        zf.write(
+                            cutout_path,
+                            arcname="foreground_cutout.png",
+                        )
+
+                    # Background variants
+                    for i, vp in enumerate(variant_paths or []):
+                        if os.path.exists(vp):
+                            zf.write(
+                                vp,
+                                arcname=f"bg_variant_{i+1}.png",
+                            )
+
+                    # Simple metadata
+                    meta = {
+                        "shot_id": selected_shot_id,
+                        "background_prompt": bg_prompt,
+                    }
+                    zf.writestr(
+                        "metadata.json",
+                        json.dumps(meta, indent=2),
+                    )
+
+                buf.seek(0)
+                st.download_button(
+                    "⬇️ Save shot_assets.zip",
+                    data=buf,
+                    file_name=f"shot_{selected_shot_id}_assets.zip",
+                    mime="application/zip",
+                )
 
 
 if __name__ == "__main__":
