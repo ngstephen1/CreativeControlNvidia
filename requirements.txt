@@ -1,0 +1,21 @@
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+httpx
+
+# For agents / orchestration
+google-genai
+tiktoken
+
+# For JSON diffing and validation
+jsonschema
+deepdiff
+
+# For simple UI (fastest MVP path)
+streamlit
+
+# Optional: image handling & plotting
+Pillow
+matplotlib
+
