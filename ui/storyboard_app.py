@@ -40,6 +40,11 @@ ASSETS_DIR = GENERATED_DIR / "assets"
 GENERATED_DIR.mkdir(exist_ok=True, parents=True)
 ASSETS_DIR.mkdir(exist_ok=True, parents=True)
 
+# Video clips and final MV paths
+VIDEO_CLIPS_DIR = GENERATED_DIR / "mv_clips"
+FULL_MV_PATH = GENERATED_DIR / "final_music_video.mp4"
+VIDEO_CLIPS_DIR.mkdir(exist_ok=True, parents=True)
+
 # Import your pipeline pieces directly from FastAPI app
 from app.api import (  # type: ignore[import]
     creative_director,
@@ -55,6 +60,17 @@ from app.api import (  # type: ignore[import]
 # -------------------------------------------------
 # Helper functions
 # -------------------------------------------------
+def _find_clip_for_shot(scene_id: int, shot_id: str) -> Optional[Path]:
+    """Look for an MP4 clip rendered for this scene/shot.
+
+    Expected filename pattern: scene{scene_id}_{shot_id}.mp4 inside VIDEO_CLIPS_DIR.
+    Returns the Path if it exists, otherwise None.
+    """
+    candidate = VIDEO_CLIPS_DIR / f"scene{scene_id}_{shot_id}.mp4"
+    if candidate.exists():
+        return candidate
+    return None
+
 def _ensure_bria_token() -> Optional[str]:
     """Return token or show a Streamlit error and return None."""
     if not BRIA_API_TOKEN:
@@ -318,6 +334,14 @@ def main() -> None:
                 st.image(img_path, use_container_width=True, caption="Original frame")
             else:
                 st.warning(f"Image not found: {img_path}")
+
+            # Rendered clip preview (if available)
+            clip_path = _find_clip_for_shot(scene_id, shot_id)
+            if clip_path and os.path.exists(clip_path):
+                st.markdown("**Rendered clip**")
+                st.video(str(clip_path))
+            else:
+                st.caption("No rendered clip found yet for this shot. Render it in Colab and refresh.")
 
             # Allow sending this shot into Shot Asset Lab
             if st.button(
@@ -684,6 +708,23 @@ def main() -> None:
                     file_name=f"shot_{selected_shot_id}_assets.zip",
                     mime="application/zip",
                 )
+
+
+    # -------------------------------------------------
+    # Full Music Video preview (if rendered externally)
+    # -------------------------------------------------
+    st.markdown("---")
+    st.subheader("🎬 Full Music Video Preview")
+
+    if FULL_MV_PATH.exists():
+        st.video(str(FULL_MV_PATH))
+        st.caption(
+            "This final MV was rendered by the external image→video pipeline (e.g., Colab Stable Video Diffusion)."
+        )
+    else:
+        st.info(
+            "No final MV found yet. Run the Colab / GPU renderer to write 'generated/final_music_video.mp4', then refresh this page."
+        )
 
 
 if __name__ == "__main__":
