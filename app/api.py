@@ -2,21 +2,26 @@ from typing import Any, Dict, List, Optional
 import os
 from pathlib import Path
 import logging
-from fastapi import FastAPI, HTTPException
-from dotenv import load_dotenv
+
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
+from dotenv import load_dotenv
 
 from agents.creative_director import CreativeDirectorAgent
 from agents.cinematography_agent import CinematographyAgent
 from agents.continuity_agent import ContinuityAgent
 from agents.qc_agent import QualityControlAgent
 from agents.reviewer_agent import ReviewerAgent
+
 import fibo.fibo_builder as fibo_builder  # module with shot_to_fibo_json
 from fibo.image_generator_bria import FIBOBriaImageGenerator
+
+# Local SVD renderer (used only by /render-mv, optional)
 from video.svd_renderer import render_mv_from_plan
-from video.video_backend import render_music_video_with_pika
+
+# External video backend (fal.ai LongCat, etc.)
 from video.video_backend import render_music_video
+
 logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------------
@@ -50,19 +55,29 @@ ROOT = Path(__file__).resolve().parents[1]
 GENERATED_DIR = ROOT / "generated"
 GENERATED_DIR.mkdir(exist_ok=True, parents=True)
 
-# fibo_builder is the imported module (fibo.fibo_builder) with shot_to_fibo_json
+# FIBO → Bria image generator
 fibo_image_generator = FIBOBriaImageGenerator(
     api_key=BRIA_API_KEY,
     output_dir=str(GENERATED_DIR),
 )
+
+# -------------------------------------------------------------------------
+# Pydantic models
+# -------------------------------------------------------------------------
+
 
 class ScriptRequest(BaseModel):
     script_text: str
 
 
 class RenderMVRequest(BaseModel):
-    # Path to mv_video_plan.json relative to project root.
-    # Default matches your Streamlit export location.
+    """
+    Used by the local SVD-based renderer.
+
+    plan_path is relative to project root.
+    Default: generated/mv_video_plan.json (what Streamlit exports).
+    """
+
     plan_path: str = "generated/mv_video_plan.json"
 
 
@@ -71,17 +86,29 @@ class RenderMVResponse(BaseModel):
     message: str
     result: Optional[Dict[str, Any]] = None
 
+
 class RenderMVFromPlanRequest(BaseModel):
+    """
+    Used by the external video backend (fal.ai LongCat, etc.).
+    The Streamlit UI sends the whole mv_video_plan as a dict.
+    """
+
     plan: Dict[str, Any]
+
 
 class RenderMVFromPlanResponse(BaseModel):
     status: str
     message: str
     mv_url: Optional[str] = None
     clips: Optional[List[Dict[str, Any]]] = None
+    backend: Optional[str] = None
+    num_clips: Optional[int] = None
+
+
 # -------------------------------------------------------------------------
 # Health check
 # -------------------------------------------------------------------------
+
 
 @app.get("/health")
 def health() -> Dict[str, str]:
@@ -105,10 +132,12 @@ def script_to_shots(req: ScriptRequest) -> Dict[str, Any]:
 @app.post("/script-to-shots-with-cinematography")
 def script_to_shots_with_cinematography(req: ScriptRequest) -> Dict[str, Any]:
     """
-    Step 2: run CreativeDirectorAgent, then CinematographyAgent
-    to enrich each shot with camera + lighting JSON.
+    Step 2: CreativeDirectorAgent + CinematographyAgent
+    to get shots with camera + lighting JSON.
     """
-    base_shots: List[Dict[str, Any]] = creative_director.script_to_shots(req.script_text)
+    base_shots: List[Dict[str, Any]] = creative_director.script_to_shots(
+        req.script_text
+    )
     enriched_shots = cinematography_agent.enrich_shots(base_shots)
     return {"shots": enriched_shots}
 
@@ -141,7 +170,7 @@ def full_pipeline(req: ScriptRequest) -> Dict[str, Any]:
     # 4) quality control
     qc_report = qc_agent.check_shots(shots_step3)
 
-    # 5) reviewer summary (later: AI suggestions)
+    # 5) reviewer summary
     review = reviewer_agent.review(shots_step3, qc_report)
 
     return {
@@ -161,14 +190,7 @@ def full_pipeline(req: ScriptRequest) -> Dict[str, Any]:
 @app.post("/full-pipeline-fibo-json")
 def full_pipeline_fibo_json(req: ScriptRequest) -> Dict[str, Any]:
     """
-    Full agent pipeline + FIBO JSON builder.
-
-    1. CreativeDirectorAgent  -> shot templates
-    2. CinematographyAgent    -> add camera + lighting
-    3. ContinuityAgent        -> enforce character & scene consistency
-    4. QualityControlAgent    -> generate QC report
-    5. ReviewerAgent          -> wrap report into review summary
-    6. fibo.fibo_builder      -> map each shot to FIBO-style JSON payload
+    Full agent pipeline + FIBO JSON builder (no image rendering).
     """
     # 1) shot breakdown
     shots_step1 = creative_director.script_to_shots(req.script_text)
@@ -251,11 +273,14 @@ def full_pipeline_generate_images(req: ScriptRequest) -> Dict[str, Any]:
 
         try:
             img_path = fibo_image_generator.generate_image_from_fibo_json(fibo_json)
-        except Exception as exc:  # pragma: no cover - broad to surface API errors
+        except Exception as exc:
+            # Bubble up as 502 because it's an upstream service error (Bria API)
             raise HTTPException(
                 status_code=502,
-                detail=f"Error generating image for shot "
-                f"{shot.get('shot_id', 'UNKNOWN')}: {exc}",
+                detail=(
+                    "Error generating image for shot "
+                    f"{shot.get('shot_id', 'UNKNOWN')}: {exc}"
+                ),
             ) from exc
 
         image_results.append(
@@ -275,16 +300,21 @@ def full_pipeline_generate_images(req: ScriptRequest) -> Dict[str, Any]:
         "fibo_payloads": fibo_payloads,
         "generated_images": image_results,
     }
-    
-    
-    
+
+
+# -------------------------------------------------------------------------
+# Local SVD music video rendering from mv_video_plan.json (optional)
+# -------------------------------------------------------------------------
+
+
 @app.post("/render-mv", response_model=RenderMVResponse)
 def render_mv_endpoint(
     req: RenderMVRequest,
     background_tasks: BackgroundTasks,
 ) -> RenderMVResponse:
     """
-    Trigger music video rendering from mv_video_plan.json.
+    Trigger music video rendering from mv_video_plan.json using the local
+    Stable Video Diffusion renderer (video/svd_renderer.py).
 
     This will:
       - Load the plan JSON (script→shots→images→mv_video_plan.json)
@@ -301,33 +331,44 @@ def render_mv_endpoint(
             detail=f"Video plan file not found at {plan_path}",
         )
 
-    def _do_render():
+    def _do_render() -> None:
         try:
-            logger.info("Starting MV rendering job...")
+            logger.info("Starting MV rendering job (local SVD)...")
             result = render_mv_from_plan(plan_path, GENERATED_DIR)
-            logger.info(f"MV rendering completed: {result}")
+            logger.info("MV rendering completed: %s", result)
         except Exception as e:
-            logger.exception(f"Error in MV rendering background task: {e}")
+            logger.exception("Error in MV rendering background task: %s", e)
 
     background_tasks.add_task(_do_render)
 
     return RenderMVResponse(
         status="started",
         message=(
-            "Music video rendering started on backend. "
+            "Music video rendering started on backend (local SVD). "
             "Refresh the Streamlit UI after some time to see clips and the final MV."
         ),
         result=None,
     )
-    
+
+
+# -------------------------------------------------------------------------
+# External video backend rendering from in-memory mv_video_plan (fal.ai)
+# -------------------------------------------------------------------------
+
+
 @app.post("/render-mv-json", response_model=RenderMVFromPlanResponse)
-def render_mv_from_plan_endpoint(req: RenderMVFromPlanRequest) -> RenderMVFromPlanResponse:
+def render_mv_from_plan_endpoint(
+    req: RenderMVFromPlanRequest,
+) -> RenderMVFromPlanResponse:
     """
     Accept an mv_video_plan dict and delegate to the external video backend
-    (Pika, Runway, fal.ai, etc.) via video_backend.render_music_video(...).
+    via video_backend.render_music_video(...).
 
-    The backend is expected to return a final MV URL and optionally per-shot
-    clip URLs.
+    The backend (currently fal.ai LongCat image→video) is expected to return:
+      - status
+      - message
+      - mv_url: final stitched MV URL
+      - clips: per-shot clip metadata (including clip_url)
     """
     try:
         result = render_music_video(req.plan)
@@ -335,9 +376,22 @@ def render_mv_from_plan_endpoint(req: RenderMVFromPlanRequest) -> RenderMVFromPl
         # Wrap any unexpected error from the video backend
         raise HTTPException(status_code=500, detail=f"Video backend error: {e}")
 
+    # Optional: derive mv_url from the first clip if not provided
+    mv_url = result.get("mv_url")
+    clips = result.get("clips") or []
+    if not mv_url and clips:
+        first = clips[0] or {}
+        mv_url = (
+            first.get("video_url")
+            or first.get("url")
+            or (first.get("video") or {}).get("url")
+        )
+
     return RenderMVFromPlanResponse(
         status=result.get("status", "done"),
         message=result.get("message", "Music video rendered."),
-        mv_url=result.get("mv_url"),
-        clips=result.get("clips"),
+        mv_url=mv_url,
+        clips=clips,
+        backend=result.get("backend"),
+        num_clips=result.get("num_clips"),
     )

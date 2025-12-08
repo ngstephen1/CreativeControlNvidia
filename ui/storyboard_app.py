@@ -35,7 +35,7 @@ BRIA_IMAGE_EDIT_BASE = os.getenv(
     "BRIA_IMAGE_EDIT_BASE", "https://engine.prod.bria-api.com/v2/image/edit"
 )
 
-# Backend for rendering music videos (FastAPI + SVD on GPU)
+# Backend for rendering music videos (FastAPI + external video backend)
 RENDER_BACKEND_BASE = os.getenv("RENDER_BACKEND_BASE", "http://localhost:8000")
 
 GENERATED_DIR = ROOT / "generated"
@@ -69,7 +69,8 @@ def _find_clip_for_shot(scene_id: int, shot_id: str) -> Optional[Path]:
     Expected filename pattern: scene{scene_id}_{shot_id}.mp4 inside VIDEO_CLIPS_DIR.
     Returns the Path if it exists, otherwise None.
     """
-    candidate = VIDEO_CLIPS_DIR / f"scene{scene_id}_{shot_id}.mp4"
+    safe_shot_id = str(shot_id)
+    candidate = VIDEO_CLIPS_DIR / f"scene{scene_id}_{safe_shot_id}.mp4"
     if candidate.exists():
         return candidate
     return None
@@ -201,7 +202,7 @@ def run_full_pipeline(script_text: str) -> Dict[str, Any]:
 def build_video_plan(result: Dict[str, Any], video_backend: str) -> Dict[str, Any]:
     """Build a JSON-serializable plan that describes which storyboard frames
     should become which video clips. This is meant to be consumed by a
-    GPU backend (FastAPI + SVD) or external service (Pika, Runway) for
+    GPU backend (FastAPI + SVD) or external service (Pika, Runway, fal.ai) for
     image→video or text→video generation.
     """
     shots: List[Dict[str, Any]] = result.get("shots", [])
@@ -248,13 +249,13 @@ def main() -> None:
     with col_left:
         st.subheader("Script")
         default_script = (
-        "Scene 1: Night rain on the city. A single violinist plays under a street lamp while cars pass in the distance.\n\n"
-        "Scene 2: Closer shot of the violinist’s face, eyes closed, raindrops on the instrument, soft neon reflections in the puddles.\n\n"
-        "Scene 3: The next morning, the violinist rides a tram through the city, watching the world pass by the window in slow motion.\n\n"
-        "Scene 4: Inside a quiet cafe, the violinist sits by the window, notebook open, sketching music ideas on paper.\n\n"
-        "Scene 5: Evening rooftop performance with a small crowd gathered, string lights overhead, city skyline in the background.\n\n"
-        "Scene 6: Montage of hands on strings, city lights blurring in bokeh, silhouettes walking in the rain, and the violinist smiling at the camera.\n\n"
-        "Scene 7: Final wide shot of the city at blue hour, the violinist standing on a bridge, music echoing as cars stream by in light trails."
+            "Scene 1: Night rain on the city. A single violinist plays under a street lamp while cars pass in the distance.\n\n"
+            "Scene 2: Closer shot of the violinist’s face, eyes closed, raindrops on the instrument, soft neon reflections in the puddles.\n\n"
+            "Scene 3: The next morning, the violinist rides a tram through the city, watching the world pass by the window in slow motion.\n\n"
+            "Scene 4: Inside a quiet cafe, the violinist sits by the window, notebook open, sketching music ideas on paper.\n\n"
+            "Scene 5: Evening rooftop performance with a small crowd gathered, string lights overhead, city skyline in the background.\n\n"
+            "Scene 6: Montage of hands on strings, city lights blurring in bokeh, silhouettes walking in the rain, and the violinist smiling at the camera.\n\n"
+            "Scene 7: Final wide shot of the city at blue hour, the violinist standing on a bridge, music echoing as cars stream by in light trails."
         )
         script_text = st.text_area(
             "Paste your scene description or multi-scene script:",
@@ -276,14 +277,14 @@ def main() -> None:
         # Video backend selection (for mv_video_plan)
         backend_label_map = {
             "Stable Video Diffusion (SVD – open-source, GPU backend)": "svd",
-            "Pika (cinematic API)": "pika",
-            "Runway Gen-2 (API)": "runway",
+            "LongCat Video (fal.ai – image→video)": "longcat",
         }
         default_backend_label = "Stable Video Diffusion (SVD – open-source, GPU backend)"
         selected_backend_label = st.selectbox(
             "Video backend for image→video (used in export plan):",
             list(backend_label_map.keys()),
             index=list(backend_label_map.keys()).index(default_backend_label),
+            key="video_backend_select",
         )
         video_backend_value = backend_label_map[selected_backend_label]
         st.session_state["video_backend"] = video_backend_value
@@ -331,6 +332,8 @@ def main() -> None:
     for shot, img_meta, fibo_payload in zip(shots, images, fibo_payloads):
         shot_id = shot.get("shot_id")
         scene_id = shot.get("scene")
+        if shot_id is None:
+            continue
         shot_id_to_image_path[shot_id] = img_meta["image_path"]
 
         st.markdown(f"### Scene {scene_id} – Shot {shot_id}")
@@ -445,10 +448,12 @@ def main() -> None:
                         else angle_options.index("eye-level")
                     )
 
+                    # 🔑 unique keys per shot for these three selectboxes
                     new_angle = st.selectbox(
                         "Camera angle",
                         angle_options,
                         index=angle_index,
+                        key=f"regen_angle_{shot_id}",
                     )
 
                     new_mood = st.selectbox(
@@ -460,7 +465,23 @@ def main() -> None:
                             "melancholic, lonely atmosphere",
                             "energetic, dynamic atmosphere",
                         ],
-                        index=0,
+                        index=[
+                            "cinematic, contemplative atmosphere",
+                            "tense, suspenseful atmosphere",
+                            "hopeful, uplifting atmosphere",
+                            "melancholic, lonely atmosphere",
+                            "energetic, dynamic atmosphere",
+                        ].index(current_mood)
+                        if current_mood
+                        in [
+                            "cinematic, contemplative atmosphere",
+                            "tense, suspenseful atmosphere",
+                            "hopeful, uplifting atmosphere",
+                            "melancholic, lonely atmosphere",
+                            "energetic, dynamic atmosphere",
+                        ]
+                        else 0,
+                        key=f"regen_mood_{shot_id}",
                     )
 
                     new_colors = st.selectbox(
@@ -471,7 +492,21 @@ def main() -> None:
                             "soft neutral daylight colors",
                             "high-contrast noir with deep shadows",
                         ],
-                        index=0,
+                        index=[
+                            "cool blues and purples with warm highlights from artificial lights",
+                            "warm orange and teal blockbuster palette",
+                            "soft neutral daylight colors",
+                            "high-contrast noir with deep shadows",
+                        ].index(current_colors)
+                        if current_colors
+                        in [
+                            "cool blues and purples with warm highlights from artificial lights",
+                            "warm orange and teal blockbuster palette",
+                            "soft neutral daylight colors",
+                            "high-contrast noir with deep shadows",
+                        ]
+                        else 0,
+                        key=f"regen_colors_{shot_id}",
                     )
 
                     submitted = st.form_submit_button("🔁 Regenerate this shot")
@@ -538,11 +573,12 @@ def main() -> None:
         data=json_bytes,
         file_name="mv_video_plan.json",
         mime="application/json",
+        key="download_mv_plan",
     )
     st.caption(
         "Use this JSON in a Colab notebook or external pipeline to turn "
-        "keyframes into music video clips using Stable Video Diffusion, Pika, "
-        "Runway, or any other backend."
+        "keyframes into music video clips using Stable Video Diffusion, LongCat, "
+        "or any other backend."
     )
 
     # --- Render MV Button (calls external video backend via FastAPI) ---
@@ -592,6 +628,7 @@ def main() -> None:
         "Select a shot to edit",
         list(shot_id_to_image_path.keys()),
         index=list(shot_id_to_image_path.keys()).index(default_shot_id),
+        key="asset_lab_shot_select",
     )
     selected_image_path = shot_id_to_image_path[selected_shot_id]
 
@@ -658,8 +695,11 @@ def main() -> None:
         bg_prompt = st.text_input(
             "Describe new background:",
             value="cinematic neon city street at night, soft rain, bokeh lights",
+            key="bg_prompt_input",
         )
-        num_variants = st.slider("Number of variants", 1, 4, 2)
+        num_variants = st.slider(
+            "Number of variants", 1, 4, 2, key="bg_num_variants_slider"
+        )
 
         if st.button("🎨 Generate background variants", key="btn_bg_variants"):
             base_for_variants = enhanced_path or cutout_path or selected_image_path
@@ -747,8 +787,8 @@ def main() -> None:
                     data=buf,
                     file_name=f"shot_{selected_shot_id}_assets.zip",
                     mime="application/zip",
+                    key="download_shot_zip",
                 )
-
 
     # -------------------------------------------------
     # Full Music Video preview (if rendered externally)
@@ -760,12 +800,13 @@ def main() -> None:
     if mv_url:
         st.video(mv_url)
         st.caption(
-            "This final MV was rendered by the external image→video backend (e.g., Pika, Runway, fal.ai)."
+            "This final MV was rendered by the external image→video backend (e.g., SVD, LongCat, Pika, Runway, fal.ai)."
         )
     else:
         st.info(
             "No final music video yet. Click 'Render Full Music Video' above to generate one."
         )
+
 
 if __name__ == "__main__":
     main()
