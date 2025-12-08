@@ -242,10 +242,15 @@ def main() -> None:
     )
 
     st.title("🎬 Autonomous Studio Director")
-    st.caption("JSON-native FIBO storyboard generator (Bria) + Music Video export")
+    st.caption(
+        "JSON-native FIBO storyboard generator (Bria) + controllable Music Video export"
+    )
 
     col_left, col_right = st.columns([2, 1], gap="large")
 
+    # ------------------------
+    # Left: script input
+    # ------------------------
     with col_left:
         st.subheader("Script")
         default_script = (
@@ -266,12 +271,15 @@ def main() -> None:
 
         generate_button = st.button("🚀 Generate Storyboard", type="primary")
 
+    # ------------------------
+    # Right: settings & status
+    # ------------------------
     with col_right:
         st.subheader("Run settings")
         st.markdown(
-            "- Uses your local **multi-agent pipeline**\n"
-            "- Calls Bria FIBO via **structured_prompt**\n"
-            "- Saves frames to `generated/` folder\n"
+            "- Uses your local **multi-agent pipeline** (Creative Director → Cinematography → Continuity → QC → Reviewer)\n"
+            "- Calls **Bria FIBO** for JSON-native image control (structured_prompt)\n"
+            "- Saves keyframes to `generated/` for downstream video backends\n"
         )
 
         # Video backend selection (for mv_video_plan)
@@ -279,7 +287,9 @@ def main() -> None:
             "Stable Video Diffusion (SVD – open-source, GPU backend)": "svd",
             "LongCat Video (fal.ai – image→video)": "longcat",
         }
-        default_backend_label = "Stable Video Diffusion (SVD – open-source, GPU backend)"
+        default_backend_label = (
+            "Stable Video Diffusion (SVD – open-source, GPU backend)"
+        )
         selected_backend_label = st.selectbox(
             "Video backend for image→video (used in export plan):",
             list(backend_label_map.keys()),
@@ -289,22 +299,27 @@ def main() -> None:
         video_backend_value = backend_label_map[selected_backend_label]
         st.session_state["video_backend"] = video_backend_value
 
+        st.markdown("**Backend service URL**")
+        st.code(RENDER_BACKEND_BASE, language="text")
+
         if "last_run_summary" in st.session_state:
-            st.markdown("**Last run:**")
+            st.markdown("**Last storyboard run:**")
             st.json(st.session_state["last_run_summary"])
 
         if BRIA_API_TOKEN:
             st.success("BRIA_API_TOKEN loaded.")
         else:
-            st.warning("BRIA_API_TOKEN not found – generation will fail for edit tools.")
+            st.warning("BRIA_API_TOKEN not found – Bria-powered edit tools will fail.")
 
-    # Run full pipeline when button clicked
+    # ========================
+    #  Run storyboard pipeline
+    # ========================
     if generate_button:
         if not script_text.strip():
             st.error("Please enter a script first.")
             return
 
-        with st.spinner("Generating storyboard with FIBO…"):
+        with st.spinner("Generating storyboard with Bria FIBO + multi-agent pipeline…"):
             result = run_full_pipeline(script_text)
 
         st.session_state["storyboard"] = result
@@ -340,7 +355,7 @@ def main() -> None:
 
         cols = st.columns([2, 3])
 
-        # Left: original image
+        # Left: original image + rendered clip preview
         with cols[0]:
             img_path = img_meta["image_path"]
             if os.path.exists(img_path):
@@ -367,7 +382,7 @@ def main() -> None:
                 st.session_state["asset_lab_image_path"] = img_path
                 st.info(f"Shot {shot_id} sent to Shot Asset Lab (below).")
 
-        # Right: metadata + JSON + controls
+        # Right: metadata + JSON + controllability
         with cols[1]:
             st.markdown("**Description**")
             st.write(shot.get("description", ""))
@@ -403,7 +418,22 @@ def main() -> None:
                         "orbital_around_subject",
                         "static_camera_subtle_motion",
                     ],
-                    index=0,
+                    index=[
+                        "slow_cinematic_push_in",
+                        "slow_dolly_out",
+                        "handheld_drift",
+                        "orbital_around_subject",
+                        "static_camera_subtle_motion",
+                    ].index(current_motion)
+                    if current_motion
+                    in [
+                        "slow_cinematic_push_in",
+                        "slow_dolly_out",
+                        "handheld_drift",
+                        "orbital_around_subject",
+                        "static_camera_subtle_motion",
+                    ]
+                    else 0,
                     key=f"motion_{shot_id}",
                 )
 
@@ -412,8 +442,8 @@ def main() -> None:
                 shot["motion_style"] = new_motion
 
                 st.caption(
-                    "These values will be embedded in mv_video_plan.json "
-                    "for the GPU video backend or external services."
+                    "These values are embedded in `mv_video_plan.json` for GPU video backends "
+                    "(SVD, LongCat, etc.) to generate consistent clips."
                 )
 
             with st.expander("FIBO StructuredPrompt JSON (original)"):
@@ -509,6 +539,55 @@ def main() -> None:
                         key=f"regen_colors_{shot_id}",
                     )
 
+                    # --- HDR / 16-bit toggle ---
+                    hdr_mode_current = original_fibo.get("hdr_mode", "off")
+                    hdr_options = ["off", "hdr10", "hdr10_plus"]
+                    hdr_mode = st.selectbox(
+                        "HDR / Color pipeline",
+                        hdr_options,
+                        index=hdr_options.index(hdr_mode_current)
+                        if hdr_mode_current in hdr_options
+                        else 0,
+                        key=f"regen_hdr_{shot_id}",
+                    )
+
+                    # --- Lighting blueprint presets ---
+                    lighting_presets = [
+                        "default",
+                        "soft_key_fill_back",
+                        "high_contrast_noir",
+                        "neon_night_city",
+                        "golden_hour_backlight",
+                    ]
+                    lighting_current = original_fibo.get(
+                        "lighting_blueprint", "default"
+                    )
+                    lighting_blueprint = st.selectbox(
+                        "Lighting blueprint",
+                        lighting_presets,
+                        index=lighting_presets.index(lighting_current)
+                        if lighting_current in lighting_presets
+                        else 0,
+                        key=f"regen_light_{shot_id}",
+                    )
+
+                    # --- Film stock color palettes ---
+                    film_stocks = [
+                        "none",
+                        "kodak_2383_cine",
+                        "fuji_pro_400h",
+                        "ilford_hp5_bw",
+                    ]
+                    film_current = original_fibo.get("film_stock", "none")
+                    film_stock = st.selectbox(
+                        "Film stock / color palette",
+                        film_stocks,
+                        index=film_stocks.index(film_current)
+                        if film_current in film_stocks
+                        else 0,
+                        key=f"regen_film_{shot_id}",
+                    )
+
                     submitted = st.form_submit_button("🔁 Regenerate this shot")
 
                 if submitted:
@@ -521,6 +600,11 @@ def main() -> None:
                             "mood_atmosphere"
                         ] = new_mood
                         modified_fibo["aesthetics"]["color_scheme"] = new_colors
+
+                        # New pro controls written into FIBO
+                        modified_fibo["hdr_mode"] = hdr_mode
+                        modified_fibo["lighting_blueprint"] = lighting_blueprint
+                        modified_fibo["film_stock"] = film_stock
 
                         new_img_path = (
                             fibo_image_generator.generate_image_from_fibo_json(
@@ -547,7 +631,9 @@ def main() -> None:
                     with st.expander("Modified FIBO StructuredPrompt JSON"):
                         st.json(modified_fibo)
 
+    # ========================
     # QC + review section
+    # ========================
     st.subheader("✅ Quality Check & Review")
     st.markdown("**QC Report:**")
     if result["qc_report"]:
@@ -584,7 +670,9 @@ def main() -> None:
     # --- Render MV Button (calls external video backend via FastAPI) ---
     st.markdown("#### Or render the full MV using your video backend:")
     if st.button("🎬 Render Full Music Video", key="btn_render_mv"):
-        with st.spinner("Sending video plan to backend and rendering music video..."):
+        with st.spinner(
+            "Sending video plan to backend and rendering music video..."
+        ):
             try:
                 resp = requests.post(
                     f"{RENDER_BACKEND_BASE.rstrip('/')}/render-mv-json",
@@ -595,10 +683,14 @@ def main() -> None:
                     st.error(f"Backend error: {resp.status_code} {resp.text[:400]}")
                 else:
                     mv_result = resp.json()
+                    st.session_state["last_mv_result"] = mv_result
+
                     mv_url = mv_result.get("mv_url")
                     if mv_url:
-                        # If backend returned a relative path, prefix with backend base URL
-                        if mv_url.startswith("http://") or mv_url.startswith("https://"):
+                        # If backend returned a full URL, use it, otherwise prefix with backend base URL
+                        if mv_url.startswith("http://") or mv_url.startswith(
+                            "https://"
+                        ):
                             full_url = mv_url
                         else:
                             full_url = f"{RENDER_BACKEND_BASE.rstrip('/')}{mv_url}"
