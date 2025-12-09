@@ -15,6 +15,20 @@ from agents.qc_agent import QualityControlAgent
 from agents.reviewer_agent import ReviewerAgent
 
 import fibo.fibo_builder as fibo_builder
+# Gemini character continuity annotator (vision + JSON)
+try:
+    from gemini.character_annotator import (
+        annotate_character_image,
+        annotate_batch,
+        CharacterAnnotation,
+    )
+    HAS_GEMINI = True
+except Exception:  # pragma: no cover - optional dependency
+    HAS_GEMINI = False
+    annotate_character_image = None  # type: ignore
+    annotate_batch = None  # type: ignore
+    CharacterAnnotation = None  # type: ignore
+
 from fibo.image_generator_bria import FIBOBriaImageGenerator
 from PIL import Image, ImageFilter, ImageEnhance
 # Local SVD renderer (optional; used by /render-mv)
@@ -189,10 +203,83 @@ class ImagePathRequest(BaseModel):
     scale: Optional[int] = 2
 
 
+
 class ImageToolResponse(BaseModel):
     tool: str
     input_path: str
     output_path: str
+
+
+# -------------------------------------------------------------------------
+# Gemini character annotation models
+# -------------------------------------------------------------------------
+
+class CharacterAnnotateRequest(BaseModel):
+    """Request for per-shot Gemini character annotation.
+
+    image_path: relative to repo root or absolute path.
+    shot_id: optional shot identifier (used in continuity inspector).
+    scene_prompt: optional natural language description of the scene
+        (e.g., the script line or FIBO text) to give Gemini more context.
+    """
+
+    image_path: str
+    shot_id: Optional[str] = None
+    scene_prompt: Optional[str] = None
+
+
+class CharacterAnnotateBatchRequest(BaseModel):
+    """Batch version of character annotation.
+
+    Primarily used by the Continuity Inspector if we want to analyze
+    multiple frames in one call.
+    """
+
+    items: List[CharacterAnnotateRequest]
+
+
+class CharacterAnnotateResponse(BaseModel):
+    """Standard response wrapper around CharacterAnnotation.
+
+    The `annotation` field is a JSON-serializable dict coming from
+    gemini.character_annotator.CharacterAnnotation.
+    """
+
+    status: str
+    annotation: Dict[str, Any]
+
+
+# -------------------------------------------------------------------------
+# Character continuity models for continuity inspector (high-level batch)
+# -------------------------------------------------------------------------
+
+class CharacterContinuityRequest(BaseModel):
+    """
+    Request used by the higher-level Continuity Inspector in the UI.
+
+    The UI sends three parallel lists:
+      - image_paths: relative or absolute paths to frame images
+      - shot_ids: optional shot identifiers (same length as image_paths)
+      - scene_prompts: optional text descriptions (same length as image_paths)
+
+    We convert these into CharacterAnnotateRequest items internally.
+    """
+
+    image_paths: List[str]
+    shot_ids: Optional[List[Optional[str]]] = None
+    scene_prompts: Optional[List[Optional[str]]] = None
+
+
+class CharacterContinuityResponse(BaseModel):
+    """
+    Response payload for the Continuity Inspector.
+
+    - annotations: list of CharacterAnnotation dicts (one per input image)
+    - status: overall status string ("ok" on success)
+    """
+
+    status: str
+    annotations: List[Dict[str, Any]]
 
 
 # -------------------------------------------------------------------------
@@ -836,3 +923,191 @@ def bria_rmbg(req: ImagePathRequest) -> ImageToolResponse:
         input_path=rel_in,
         output_path=rel_out,
     )
+
+
+# -------------------------------------------------------------------------
+# Gemini tools: Character continuity annotation
+# -------------------------------------------------------------------------
+
+
+@app.post("/tools/gemini/annotate-character", response_model=CharacterAnnotateResponse)
+def gemini_annotate_character(req: CharacterAnnotateRequest) -> CharacterAnnotateResponse:
+    """Run Gemini 2.5 Pro over a single frame to annotate the main character.
+
+    This endpoint returns a structured JSON annotation that includes
+    face bounding box, clothing, props, expression, pose, and
+    continuity_tags so the Continuity Inspector can track character
+    consistency across shots.
+    """
+
+    if not HAS_GEMINI:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Gemini annotator is not available on this deployment. "
+                "Ensure GEMINI_API_KEY is set and gemini/character_annotator.py "
+                "is importable."
+            ),
+        )
+
+    # Resolve image path against project root if needed
+    if os.path.isabs(req.image_path):
+        src_path = Path(req.image_path)
+    else:
+        src_path = (ROOT / req.image_path).resolve()
+
+    if not src_path.exists():
+        raise HTTPException(status_code=404, detail=f"Image not found: {src_path}")
+
+    try:
+        ann_model = annotate_character_image(
+            image_path=str(src_path),
+            shot_id=req.shot_id,
+            scene_prompt=req.scene_prompt,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        # Most likely missing GEMINI_API_KEY or auth misconfiguration
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:  # pragma: no cover - defensive
+        logging.exception("Gemini annotation failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Gemini annotation failed: {e}")
+
+    # CharacterAnnotation is a Pydantic model; convert to raw dict
+    annotation_dict: Dict[str, Any] = ann_model.dict() if ann_model is not None else {}
+
+    return CharacterAnnotateResponse(status="ok", annotation=annotation_dict)
+
+
+@app.post("/tools/gemini/annotate-character-batch", response_model=List[CharacterAnnotateResponse])
+def gemini_annotate_character_batch(
+    req: CharacterAnnotateBatchRequest,
+) -> List[CharacterAnnotateResponse]:
+    """Batch Gemini character annotation for multiple frames.
+
+    The UI can use this to score continuity across a sequence of shots.
+    """
+
+    if not HAS_GEMINI:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Gemini annotator is not available on this deployment. "
+                "Ensure GEMINI_API_KEY is set and gemini/character_annotator.py "
+                "is importable."
+            ),
+        )
+
+    if not req.items:
+        raise HTTPException(status_code=400, detail="items list is empty")
+
+    # Resolve paths first
+    paths: List[str] = []
+    shot_ids: List[Optional[str]] = []
+    prompts: List[Optional[str]] = []
+    for item in req.items:
+        if os.path.isabs(item.image_path):
+            p = Path(item.image_path)
+        else:
+            p = (ROOT / item.image_path).resolve()
+        if not p.exists():
+            raise HTTPException(status_code=404, detail=f"Image not found: {p}")
+        paths.append(str(p))
+        shot_ids.append(item.shot_id)
+        prompts.append(item.scene_prompt)
+
+    try:
+        ann_models = annotate_batch(paths, shot_ids=shot_ids, scene_prompts=prompts)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:  # pragma: no cover - defensive
+        logging.exception("Gemini batch annotation failed: %s", e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Gemini batch annotation failed: {e}",
+        )
+
+    responses: List[CharacterAnnotateResponse] = []
+    for ann in ann_models:
+        annotation_dict: Dict[str, Any] = ann.dict() if ann is not None else {}
+        responses.append(
+            CharacterAnnotateResponse(status="ok", annotation=annotation_dict)
+        )
+
+    return responses
+
+
+# -------------------------------------------------------------------------
+# Gemini continuity endpoint for Streamlit UI (/tools/gemini/character-continuity)
+# -------------------------------------------------------------------------
+
+@app.post("/tools/gemini/character-continuity", response_model=CharacterContinuityResponse)
+def gemini_character_continuity(req: CharacterContinuityRequest) -> CharacterContinuityResponse:
+    """
+    High-level Gemini 2.5 Pro continuity endpoint used by the Streamlit UI.
+
+    The UI sends parallel lists of image_paths / shot_ids / scene_prompts.
+    We:
+      - resolve all paths relative to the project root,
+      - call the lower-level annotate_batch(...) helper, and
+      - return a flat list of JSON-serializable annotations.
+
+    This endpoint is what storyboard_app.py calls at:
+        /tools/gemini/character-continuity
+    """
+
+    if not HAS_GEMINI:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Gemini annotator is not available on this deployment. "
+                "Ensure GEMINI_API_KEY is set and gemini/character_annotator.py "
+                "is importable."
+            ),
+        )
+
+    if not req.image_paths:
+        raise HTTPException(status_code=400, detail="image_paths list is empty")
+
+    # Normalize optional lists so we can index into them safely
+    num_items = len(req.image_paths)
+    shot_ids = (req.shot_ids or []) + [None] * max(0, num_items - len(req.shot_ids or []))
+    scene_prompts = (req.scene_prompts or []) + [None] * max(0, num_items - len(req.scene_prompts or []))
+
+    resolved_paths: List[str] = []
+    used_shot_ids: List[Optional[str]] = []
+    used_prompts: List[Optional[str]] = []
+
+    for idx in range(num_items):
+        raw_path = req.image_paths[idx]
+        if os.path.isabs(raw_path):
+            p = Path(raw_path)
+        else:
+            p = (ROOT / raw_path).resolve()
+        if not p.exists():
+            raise HTTPException(status_code=404, detail=f"Image not found: {p}")
+        resolved_paths.append(str(p))
+        used_shot_ids.append(shot_ids[idx])
+        used_prompts.append(scene_prompts[idx])
+
+    try:
+        ann_models = annotate_batch(
+            resolved_paths,
+            shot_ids=used_shot_ids,
+            scene_prompts=used_prompts,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:  # pragma: no cover - defensive
+        logging.exception("Gemini continuity endpoint failed: %s", e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Gemini continuity endpoint failed: {e}",
+        )
+
+    annotations: List[Dict[str, Any]] = []
+    for ann in ann_models:
+        annotations.append(ann.dict() if ann is not None else {})
+
+    return CharacterContinuityResponse(status="ok", annotations=annotations)

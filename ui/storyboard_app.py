@@ -202,16 +202,19 @@ def build_directors_commentary(result: Dict[str, Any]) -> str:
         pc = fibo.get("photographic_characteristics", {})
         aesth = fibo.get("aesthetics", {})
 
-        scenes.setdefault(scene_id, {
-            "shots": [],
-            "lighting": set(),
-            "film_stocks": set(),
-            "hdr_modes": set(),
-            "camera_angles": set(),
-            "moods": set(),
-            "color_schemes": set(),
-            "locations": set(),
-        })
+        scenes.setdefault(
+            scene_id,
+            {
+                "shots": [],
+                "lighting": set(),
+                "film_stocks": set(),
+                "hdr_modes": set(),
+                "camera_angles": set(),
+                "moods": set(),
+                "color_schemes": set(),
+                "locations": set(),
+            },
+        )
 
         s = scenes[scene_id]
         s["shots"].append(shot)
@@ -391,13 +394,13 @@ def main() -> None:
     with col_left:
         st.subheader("Script")
         default_script = (
-    "Scene 1: Night rain on the city. A young Asian male violinist in his mid-20s, with medium-length black hair tucked behind his ears, warm brown eyes, a slim calm face, wearing a dark navy coat and a charcoal grey scarf, holding a worn reddish-brown wooden violin, plays under a street lamp while cars pass in the distance.\n\n"
-    "Scene 2: Closer shot of the same young Asian male violinist in his mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf, holding the same reddish-brown violin. His eyes are closed, raindrops fall onto the instrument, and neon reflections shimmer in puddles beneath him.\n\n"
-    "Scene 3: The next morning, the young Asian male violinist (mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf) rides a tram through the city with his reddish-brown violin resting beside him, watching the world pass by the window in slow motion.\n\n"
-    "Scene 4: Inside a quiet cafe, the young Asian male violinist (mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf) sits by a fogged window with his reddish-brown violin, notebook open, sketching new music ideas.\n\n"
-    "Scene 5: Evening rooftop performance. The young Asian male violinist (mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf) plays his reddish-brown violin for a small crowd under warm string lights, with the glowing city skyline behind him.\n\n"
-    "Scene 6: Montage of the young Asian male violinist (mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf) and his reddish-brown violin: close-ups of his hands on the strings, blurred city lights, silhouettes walking in the rain, and a gentle smile toward the camera.\n\n"
-    "Scene 7: Final wide shot at blue hour. The young Asian male violinist (mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf) stands on a bridge holding his reddish-brown violin, music echoing as cars below form light trails."
+            "Scene 1: Night rain on the city. A young Asian male violinist in his mid-20s, with medium-length black hair tucked behind his ears, warm brown eyes, a slim calm face, wearing a dark navy coat and a charcoal grey scarf, holding a worn reddish-brown wooden violin, plays under a street lamp while cars pass in the distance.\n\n"
+            "Scene 2: Closer shot of the same young Asian male violinist in his mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf, holding the same reddish-brown violin. His eyes are closed, raindrops fall onto the instrument, and neon reflections shimmer in puddles beneath him.\n\n"
+            "Scene 3: The next morning, the young Asian male violinist (mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf) rides a tram through the city with his reddish-brown violin resting beside him, watching the world pass by the window in slow motion.\n\n"
+            "Scene 4: Inside a quiet cafe, the young Asian male violinist (mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf) sits by a fogged window with his reddish-brown violin, notebook open, sketching new music ideas.\n\n"
+            "Scene 5: Evening rooftop performance. The young Asian male violinist (mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf) plays his reddish-brown violin for a small crowd under warm string lights, with the glowing city skyline behind him.\n\n"
+            "Scene 6: Montage of the young Asian male violinist (mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf) and his reddish-brown violin: close-ups of his hands on the strings, blurred city lights, silhouettes walking in the rain, and a gentle smile toward the camera.\n\n"
+            "Scene 7: Final wide shot at blue hour. The young Asian male violinist (mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf) stands on a bridge holding his reddish-brown violin, music echoing as cars below form light trails."
         )
         script_text = st.text_area(
             "Paste your scene description or multi-scene script:",
@@ -787,7 +790,9 @@ def main() -> None:
 
                     # Update the generated_images entry for this shot
                     for img_meta in result["generated_images"]:
-                        img_shot_id = str(img_meta.get("shot_id", img_meta.get("shot_id", "")))
+                        img_shot_id = str(
+                            img_meta.get("shot_id", img_meta.get("shot_id", ""))
+                        )
                         if img_shot_id == shot_id_str:
                             img_meta["image_path"] = new_img_path
 
@@ -888,6 +893,88 @@ def main() -> None:
         st.dataframe(continuity_rows, hide_index=True)
     else:
         st.write("No continuity data available yet – generate a storyboard first.")
+
+    # ========================
+    # Gemini Character Continuity (vision)
+    # ========================
+    st.markdown("### 🤖 Gemini Character Continuity (beta)")
+    st.caption(
+        "Use Gemini 2.5 Pro Vision to annotate character appearance, props, pose and emotion across all frames, "
+        "so you can spot continuity breaks at a glance."
+    )
+
+    if st.button("Let's Analyze Continuity!", key="btn_gemini_continuity"):
+        # Build payload for FastAPI Gemini endpoint
+        image_paths_rel: List[str] = []
+        shot_ids_list: List[str] = []
+        scene_prompts: List[str] = []
+
+        for shot, img_meta in zip(shots, images):
+            img_path = str(img_meta.get("image_path", ""))
+            if not img_path:
+                continue
+
+            # Prefer paths relative to project root so FastAPI can load them
+            try:
+                rel = str(Path(img_path).relative_to(ROOT))
+            except Exception:
+                rel = img_path
+
+            image_paths_rel.append(rel)
+            shot_ids_list.append(str(shot.get("shot_id", "")))
+            scene_prompts.append(shot.get("description", ""))
+
+        if not image_paths_rel:
+            st.error("No images available for Gemini continuity analysis.")
+        else:
+            with st.spinner("Calling Gemini character continuity endpoint…"):
+                try:
+                    resp = requests.post(
+                        f"{RENDER_BACKEND_BASE.rstrip('/')}/tools/gemini/character-continuity",
+                        json={
+                            "image_paths": image_paths_rel,
+                            "shot_ids": shot_ids_list,
+                            "scene_prompts": scene_prompts,
+                        },
+                        timeout=300,
+                    )
+                    if resp.status_code != 200:
+                        st.error(
+                            f"Gemini continuity endpoint failed: {resp.status_code} {resp.text[:400]}"
+                        )
+                    else:
+                        cont_data = resp.json()
+                        st.session_state["gemini_continuity"] = cont_data
+                        st.success("Gemini continuity analysis complete!")
+                except Exception as e:
+                    st.error(f"Error calling Gemini continuity endpoint: {e}")
+
+    # Display last Gemini continuity results (if any)
+    gemini_result = st.session_state.get("gemini_continuity")
+    if gemini_result:
+        annotations: List[Dict[str, Any]] = gemini_result.get("annotations", [])
+        if annotations:
+            rows: List[Dict[str, Any]] = []
+            for ann in annotations:
+                rows.append(
+                    {
+                        "Shot": ann.get("shot_id", ""),
+                        "Hair": ann.get("hair_color", ""),
+                        "Clothing": ", ".join(ann.get("clothing", []) or []),
+                        "Props": ", ".join(ann.get("props", []) or []),
+                        "Expression": ann.get("expression", ""),
+                        "Pose": ann.get("pose", ""),
+                        "Continuity tags": ", ".join(
+                            ann.get("continuity_tags", []) or []
+                        ),
+                    }
+                )
+            st.dataframe(rows, hide_index=True)
+
+            with st.expander("Raw Gemini notes per shot"):
+                st.json(gemini_result)
+        else:
+            st.info("Gemini continuity response contained no annotations.")
 
     # -------------------------------------------------
     # Music Video export: mv_video_plan.json
@@ -1081,7 +1168,7 @@ def main() -> None:
                 caption="Enhanced foreground (2MP)",
             )
 
-        st.markdown("**Bria Upscale (side‑by‑side)**")
+        st.markdown("**Bria Upscale (side-by-side)**")
         upscale_scale = st.selectbox(
             "Upscale factor",
             [2, 4],
