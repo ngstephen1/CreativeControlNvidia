@@ -9,10 +9,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 
+import pandas as pd
 import requests
 import streamlit as st
 from dotenv import load_dotenv
-from PIL import Image, ImageDraw  # NEW: for composition overlays
+from PIL import Image, ImageDraw  # for composition overlays and Gemini bounding boxes
 
 # -------------------------------------------------
 # Bootstrap: paths + env
@@ -381,6 +382,10 @@ def main() -> None:
         layout="wide",
     )
 
+    # Shared backend base for all HTTP calls (FastAPI host)
+    if "backend_base" not in st.session_state:
+        st.session_state["backend_base"] = RENDER_BACKEND_BASE
+
     st.title("🎬 Autonomous Studio Director")
     st.caption(
         "JSON-native FIBO storyboard generator (Bria) + controllable Music Video export"
@@ -481,7 +486,7 @@ def main() -> None:
     images = result["generated_images"]
     fibo_payloads = result["fibo_payloads"]
 
-    # Map shot_id -> path / fibo for Shot Asset Lab & continuity inspector
+    # Map shot_id -> path / fibo for Shot Asset Lab & continuity inspector & Gemini
     shot_id_to_image_path: Dict[str, str] = {}
     shot_id_to_fibo: Dict[str, Dict[str, Any]] = {}
 
@@ -821,6 +826,10 @@ def main() -> None:
                     with st.expander("Modified FIBO StructuredPrompt JSON"):
                         st.json(modified_fibo)
 
+    # After building shot maps, expose frames to Gemini
+    if shot_id_to_image_path:
+        st.session_state["gemini_frames"] = shot_id_to_image_path
+
     # ========================
     # QC + review section
     # ========================
@@ -897,84 +906,142 @@ def main() -> None:
     # ========================
     # Gemini Character Continuity (vision)
     # ========================
-    st.markdown("### 🤖 Gemini Character Continuity (beta)")
+    st.markdown("### 😁 Gemini Character Continuity (beta)")
     st.caption(
-        "Use Gemini 2.5 Pro Vision to annotate character appearance, props, pose and emotion across all frames, "
-        "so you can spot continuity breaks at a glance."
+        "Use Gemini 2.5 Pro Vision to annotate character appearance, props, pose and emotion "
+        "across all frames, so you can spot continuity breaks at a glance."
     )
 
-    if st.button("Let's Analyze Continuity!", key="btn_gemini_continuity"):
-        # Build payload for FastAPI Gemini endpoint
-        image_paths_rel: List[str] = []
-        shot_ids_list: List[str] = []
-        scene_prompts: List[str] = []
+    backend_base = st.session_state.get("backend_base", RENDER_BACKEND_BASE)
 
-        for shot, img_meta in zip(shots, images):
-            img_path = str(img_meta.get("image_path", ""))
-            if not img_path:
-                continue
+    frames_map: Dict[str, str] = st.session_state.get("gemini_frames", {})
+    existing_ann: List[Dict[str, Any]] = st.session_state.get("gemini_annotations", [])
 
-            # Prefer paths relative to project root so FastAPI can load them
-            try:
-                rel = str(Path(img_path).relative_to(ROOT))
-            except Exception:
-                rel = img_path
+    col_btn, _ = st.columns([1, 3])
+    with col_btn:
+        if st.button("Let's Analyze Continuity!"):
+            # We'll send the frame paths + shot IDs we know
+            if not frames_map:
+                st.warning(
+                    "No frames found for Gemini analysis. Generate a storyboard first."
+                )
+            else:
+                shot_ids = list(frames_map.keys())
+                frame_paths = [frames_map[sid] for sid in shot_ids]
 
-            image_paths_rel.append(rel)
-            shot_ids_list.append(str(shot.get("shot_id", "")))
-            scene_prompts.append(shot.get("description", ""))
+                url = f"{backend_base.rstrip('/')}/tools/gemini/character-continuity"
+                payload = {
+                    "image_paths": frame_paths,
+                    "shot_ids": shot_ids,
+                    "scene_prompts": [None] * len(frame_paths),
+                }
 
-        if not image_paths_rel:
-            st.error("No images available for Gemini continuity analysis.")
-        else:
-            with st.spinner("Calling Gemini character continuity endpoint…"):
                 try:
-                    resp = requests.post(
-                        f"{RENDER_BACKEND_BASE.rstrip('/')}/tools/gemini/character-continuity",
-                        json={
-                            "image_paths": image_paths_rel,
-                            "shot_ids": shot_ids_list,
-                            "scene_prompts": scene_prompts,
-                        },
-                        timeout=300,
-                    )
+                    resp = requests.post(url, json=payload, timeout=120)
                     if resp.status_code != 200:
                         st.error(
-                            f"Gemini continuity endpoint failed: {resp.status_code} {resp.text[:400]}"
+                            f"Gemini continuity endpoint failed ({resp.status_code}) for URL {url}: {resp.text}"
                         )
                     else:
-                        cont_data = resp.json()
-                        st.session_state["gemini_continuity"] = cont_data
-                        st.success("Gemini continuity analysis complete!")
-                except Exception as e:
-                    st.error(f"Error calling Gemini continuity endpoint: {e}")
+                        data = resp.json()
+                        anns = data.get("annotations", [])
+                        st.session_state["gemini_annotations"] = anns
+                        existing_ann = anns
+                        st.success("Gemini continuity analysis complete! ✅")
+                except Exception as exc:
+                    st.error(f"Gemini continuity request failed: {exc}")
 
-    # Display last Gemini continuity results (if any)
-    gemini_result = st.session_state.get("gemini_continuity")
-    if gemini_result:
-        annotations: List[Dict[str, Any]] = gemini_result.get("annotations", [])
-        if annotations:
-            rows: List[Dict[str, Any]] = []
-            for ann in annotations:
-                rows.append(
-                    {
-                        "Shot": ann.get("shot_id", ""),
-                        "Hair": ann.get("hair_color", ""),
-                        "Clothing": ", ".join(ann.get("clothing", []) or []),
-                        "Props": ", ".join(ann.get("props", []) or []),
-                        "Expression": ann.get("expression", ""),
-                        "Pose": ann.get("pose", ""),
-                        "Continuity tags": ", ".join(
-                            ann.get("continuity_tags", []) or []
-                        ),
-                    }
+    if not existing_ann:
+        st.info("Run continuity analysis to see annotations.")
+    else:
+        st.success("Gemini continuity analysis complete!")
+
+        # ---- 1) Table view (Continuity Inspector) ----
+        df_rows = []
+        for ann in existing_ann:
+            df_rows.append(
+                {
+                    "Shot": ann.get("shot_id") or "",
+                    "Hair": ann.get("hair_color") or "",
+                    "Clothing": ", ".join(ann.get("clothing") or []),
+                    "Props": ", ".join(ann.get("props") or []),
+                    "Expression": ann.get("expression") or "",
+                    "Pose": ann.get("pose") or "",
+                    "Continuity tags": ", ".join(ann.get("continuity_tags") or []),
+                }
+            )
+        df = pd.DataFrame(df_rows)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        # ---- 2) Annotated image preview with dropdown ----
+        st.markdown("#### Annotated frame preview")
+
+        # Build a list of shot labels that we can show
+        shot_labels = [row["Shot"] or f"Shot {i+1}" for i, row in enumerate(df_rows)]
+        # Map labels → annotation dict
+        label_to_ann = {label: existing_ann[i] for i, label in enumerate(shot_labels)}
+
+        # Default: first shot
+        default_index = 0
+
+        selected_label = st.selectbox(
+            "Select a shot to preview:",
+            options=shot_labels,
+            index=default_index if shot_labels else 0,
+        )
+
+        selected_ann = label_to_ann.get(selected_label)
+        selected_shot_id = selected_ann.get("shot_id") if selected_ann else None
+
+        # Try to look up the frame path from our map
+        frame_path = None
+        if selected_shot_id and selected_shot_id in frames_map:
+            frame_path = frames_map[selected_shot_id]
+        elif shot_labels and not selected_shot_id:
+            # fall back: match by order
+            # (only if we didn't get a shot_id back from Gemini)
+            idx = shot_labels.index(selected_label)
+            # align index with frames_map order
+            frame_path = list(frames_map.values())[idx] if frames_map else None
+
+        if frame_path and os.path.exists(frame_path):
+            try:
+                img = Image.open(frame_path).convert("RGB")
+                draw = ImageDraw.Draw(img)
+
+                ann_dict = selected_ann or {}
+                bbox = ann_dict.get("bounding_box") or ann_dict.get("face_box")
+                if bbox:
+                    x = bbox.get("x", 0)
+                    y = bbox.get("y", 0)
+                    w = bbox.get("width", 0)
+                    h = bbox.get("height", 0)
+                    # convert to bottom-right coords
+                    x2, y2 = x + w, y + h
+
+                    # primary face box
+                    draw.rectangle([x, y, x2, y2], outline="red", width=4)
+
+                st.image(
+                    img,
+                    caption=f"{selected_label} – annotated with Gemini character box",
+                    use_container_width=True,
                 )
-            st.dataframe(rows, hide_index=True)
-
-            with st.expander("Raw Gemini notes per shot"):
-                st.json(gemini_result)
+            except Exception as exc:
+                st.error(f"Failed to render annotated frame: {exc}")
         else:
-            st.info("Gemini continuity response contained no annotations.")
+            st.warning(
+                "Could not resolve frame path for this shot. "
+                "Make sure `st.session_state['gemini_frames']` is set."
+            )
+
+        # ---- 3) Raw Gemini notes (optional) ----
+        with st.expander("Raw Gemini notes per shot"):
+            for ann in existing_ann:
+                sid = ann.get("shot_id") or "Unknown shot"
+                st.markdown(f"**{sid}**")
+                st.markdown(ann.get("raw_model_notes") or "_(no notes)_")
+                st.markdown("---")
 
     # -------------------------------------------------
     # Music Video export: mv_video_plan.json

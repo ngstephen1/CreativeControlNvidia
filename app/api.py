@@ -15,6 +15,7 @@ from agents.qc_agent import QualityControlAgent
 from agents.reviewer_agent import ReviewerAgent
 
 import fibo.fibo_builder as fibo_builder
+
 # Gemini character continuity annotator (vision + JSON)
 try:
     from gemini.character_annotator import (
@@ -22,24 +23,27 @@ try:
         annotate_batch,
         CharacterAnnotation,
     )
+
     HAS_GEMINI = True
 except Exception:  # pragma: no cover - optional dependency
     HAS_GEMINI = False
-    annotate_character_image = None  # type: ignore
-    annotate_batch = None  # type: ignore
-    CharacterAnnotation = None  # type: ignore
+    annotate_character_image = None  # type: ignore[assignment]
+    annotate_batch = None  # type: ignore[assignment]
+    CharacterAnnotation = None  # type: ignore[assignment]
 
 from fibo.image_generator_bria import FIBOBriaImageGenerator
 from PIL import Image, ImageFilter, ImageEnhance
+
 # Local SVD renderer (optional; used by /render-mv)
 try:
     from video.svd_renderer import render_mv_from_plan  # type: ignore
+
     HAS_LOCAL_SVD = True
 except Exception:
     # On Streamlit Cloud (or minimal installs) torch/diffusers may not be present.
     # We still want the app to boot; /render-mv will just be disabled.
     HAS_LOCAL_SVD = False
-    render_mv_from_plan = None  # type: ignore
+    render_mv_from_plan = None  # type: ignore[assignment]
 
 # External video backend (fal.ai LongCat image→video) used by /render-mv-json
 from video.video_backend import render_music_video
@@ -50,6 +54,7 @@ from .bria_tools import (
     rmbg_image_file,
     BriaConfigError,
 )
+
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +75,11 @@ if not BRIA_API_KEY:
 
 # If set to 1, true, or True, this forces the /tools/bria/upscale endpoint
 # to use the local PIL-based stub instead of Bria's cloud API.
-BRIA_USE_LOCAL_UPSCALE = os.getenv("BRIA_USE_LOCAL_UPSCALE", "0").strip() in {"1", "true", "True"}
+BRIA_USE_LOCAL_UPSCALE = os.getenv("BRIA_USE_LOCAL_UPSCALE", "0").strip() in {
+    "1",
+    "true",
+    "True",
+}
 
 # -------------------------------------------------------------------------
 # FastAPI app + agent singletons
@@ -104,6 +113,7 @@ fibo_image_generator = FIBOBriaImageGenerator(
     output_dir=str(GENERATED_DIR),
 )
 
+
 # -------------------------------------------------------------------------
 # Helper: unified FIBO JSON builder (supports sh_to_fibo_json alias)
 # -------------------------------------------------------------------------
@@ -118,20 +128,8 @@ def shot_to_fibo_struct(shot: Dict[str, Any]) -> Dict[str, Any]:
 
     so the rest of the app (and Streamlit UI) does not care which
     function name the builder exposes.
-
-    The returned FIBO JSON is expected to already include advanced
-    controllability fields (with defaults if not explicitly set), e.g.:
-
-      - hdr_16bit / hdr_mode
-      - camera_preset / lens_focal_length / depth_of_field hints
-      - lighting_preset / lighting_blueprint
-      - film_palette / film_stock_palette
-      - composition_preset
-      - pose_blueprint
-      - mood_intensity / mood_controls
-      - material_style / material_controls
-      - continuity_group_id
     """
+
     if hasattr(fibo_builder, "sh_to_fibo_json"):
         # Newer helper name (shorter) used by some versions
         return fibo_builder.sh_to_fibo_json(shot)  # type: ignore[attr-defined]
@@ -141,30 +139,38 @@ def shot_to_fibo_struct(shot: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # -------------------------------------------------------------------------
+# Small helper to handle Pydantic v1/v2 dict conversion
+# -------------------------------------------------------------------------
+
+
+def _model_to_dict(model: Any) -> Dict[str, Any]:
+    """Convert a Pydantic model to a plain dict for both v1 and v2."""
+
+    if model is None:
+        return {}
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    if hasattr(model, "dict"):
+        return model.dict()
+    # Fallback – should not normally happen
+    return dict(model)  # type: ignore[arg-type]
+
+
+# -------------------------------------------------------------------------
 # Pydantic models
 # -------------------------------------------------------------------------
 
 
 class ScriptRequest(BaseModel):
-    """Basic request for all text→JSON pipelines.
-
-    For now we keep this minimal (script_text only) to stay compatible
-    with the Streamlit UI. More advanced toggles (HDR, film stock, etc.)
-    are injected via:
-      - the shot dictionaries created/modified in the UI, and
-      - fibo_builder + FIBOBriaImageGenerator.
-    """
+    """Basic request for all text→JSON pipelines."""
 
     script_text: str
 
 
 class RenderMVRequest(BaseModel):
-    """Used by the local SVD-based renderer (/render-mv).
+    """Used by the local SVD-based renderer (/render-mv)."""
 
-    plan_path is relative to project root.
-    Default: generated/mv_video_plan.json (what the Streamlit UI exports).
-    """
-
+    # Path relative to project root
     plan_path: str = "generated/mv_video_plan.json"
 
 
@@ -175,10 +181,7 @@ class RenderMVResponse(BaseModel):
 
 
 class RenderMVFromPlanRequest(BaseModel):
-    """Used by the external video backend (fal.ai LongCat, etc.).
-
-    The Streamlit UI sends the whole mv_video_plan as a dict.
-    """
+    """Used by the external video backend (fal.ai LongCat, etc.)."""
 
     plan: Dict[str, Any]
 
@@ -193,15 +196,10 @@ class RenderMVFromPlanResponse(BaseModel):
 
 
 class ImagePathRequest(BaseModel):
-    """Request payload for Bria Upscale / RMBG tools.
-
-    image_path: relative to repo root or absolute path.
-    scale: optional scale factor (for Upscale only).
-    """
+    """Request payload for Bria Upscale / RMBG tools."""
 
     image_path: str
     scale: Optional[int] = 2
-
 
 
 class ImageToolResponse(BaseModel):
@@ -214,14 +212,9 @@ class ImageToolResponse(BaseModel):
 # Gemini character annotation models
 # -------------------------------------------------------------------------
 
-class CharacterAnnotateRequest(BaseModel):
-    """Request for per-shot Gemini character annotation.
 
-    image_path: relative to repo root or absolute path.
-    shot_id: optional shot identifier (used in continuity inspector).
-    scene_prompt: optional natural language description of the scene
-        (e.g., the script line or FIBO text) to give Gemini more context.
-    """
+class CharacterAnnotateRequest(BaseModel):
+    """Request for per-shot Gemini character annotation."""
 
     image_path: str
     shot_id: Optional[str] = None
@@ -229,41 +222,20 @@ class CharacterAnnotateRequest(BaseModel):
 
 
 class CharacterAnnotateBatchRequest(BaseModel):
-    """Batch version of character annotation.
-
-    Primarily used by the Continuity Inspector if we want to analyze
-    multiple frames in one call.
-    """
+    """Batch version of character annotation."""
 
     items: List[CharacterAnnotateRequest]
 
 
 class CharacterAnnotateResponse(BaseModel):
-    """Standard response wrapper around CharacterAnnotation.
-
-    The `annotation` field is a JSON-serializable dict coming from
-    gemini.character_annotator.CharacterAnnotation.
-    """
+    """Standard response wrapper around CharacterAnnotation."""
 
     status: str
     annotation: Dict[str, Any]
 
 
-# -------------------------------------------------------------------------
-# Character continuity models for continuity inspector (high-level batch)
-# -------------------------------------------------------------------------
-
 class CharacterContinuityRequest(BaseModel):
-    """
-    Request used by the higher-level Continuity Inspector in the UI.
-
-    The UI sends three parallel lists:
-      - image_paths: relative or absolute paths to frame images
-      - shot_ids: optional shot identifiers (same length as image_paths)
-      - scene_prompts: optional text descriptions (same length as image_paths)
-
-    We convert these into CharacterAnnotateRequest items internally.
-    """
+    """High-level request used by the Continuity Inspector UI."""
 
     image_paths: List[str]
     shot_ids: Optional[List[Optional[str]]] = None
@@ -271,12 +243,7 @@ class CharacterContinuityRequest(BaseModel):
 
 
 class CharacterContinuityResponse(BaseModel):
-    """
-    Response payload for the Continuity Inspector.
-
-    - annotations: list of CharacterAnnotation dicts (one per input image)
-    - status: overall status string ("ok" on success)
-    """
+    """Response payload for the Continuity Inspector."""
 
     status: str
     annotations: List[Dict[str, Any]]
@@ -303,21 +270,11 @@ class BriaUpscaleResponse(BaseModel):
 
 
 def _local_upscale(image_path: str, scale: int) -> Path:
-    """
-    Enhanced CPU-only upscaler using PIL, with fake AI enhancement.
+    """Enhanced CPU-only upscaler using PIL, with fake AI enhancement."""
 
-    - Accepts absolute or relative image_path.
-    - Resolves relative paths against ROOT.
-    - Validates scale > 1 and file existence.
-    - Opens image, converts to RGB, resizes by 'scale' using LANCZOS.
-    - Applies fake AI enhancement: DETAIL, SHARPEN, Contrast, Color.
-    - Saves to generated/upscaled/upscaled_x{scale}_<filename>.
-    - Returns output Path.
-    """
     if scale <= 1:
         raise ValueError("scale must be > 1")
 
-    # Accept absolute or relative path
     src = Path(image_path)
     if not src.is_absolute():
         src = ROOT / src
@@ -333,7 +290,6 @@ def _local_upscale(image_path: str, scale: int) -> Path:
         w, h = im.size
         new_size = (w * scale, h * scale)
         im = im.resize(new_size, Image.LANCZOS)
-        # Fake "AI" enhancement: sharpen, detail, contrast, color
         im = im.filter(ImageFilter.DETAIL)
         im = im.filter(ImageFilter.SHARPEN)
         im = ImageEnhance.Contrast(im).enhance(1.15)
@@ -345,12 +301,8 @@ def _local_upscale(image_path: str, scale: int) -> Path:
 
 @app.post("/tools/bria/upscale-local", response_model=BriaUpscaleResponse)
 def bria_upscale_local(req: BriaUpscaleRequest) -> BriaUpscaleResponse:
-    """
-    Temporary local 'upscale' that doesn't call Bria's cloud API.
+    """Temporary local 'upscale' that doesn't call Bria's cloud API."""
 
-    This avoids DNS / network errors and API costs.
-    Use `/tools/bria/upscale` for the real HTTP-based Bria Upscale tool.
-    """
     try:
         out_path = _local_upscale(req.image_path, req.scale)
     except FileNotFoundError as e:
@@ -369,7 +321,9 @@ def bria_upscale_local(req: BriaUpscaleRequest) -> BriaUpscaleResponse:
 
     return BriaUpscaleResponse(
         status="ok",
-        message="Locally upscaled image (PIL stub). Replace with real Bria API when ready.",
+        message=(
+            "Locally upscaled image (PIL stub). Replace with real Bria API when ready."
+        ),
         input_path=req.image_path,
         output_path=str(out_path.relative_to(ROOT)),
         scale=req.scale,
@@ -384,26 +338,14 @@ def bria_upscale_local(req: BriaUpscaleRequest) -> BriaUpscaleResponse:
 
 
 class ComfyUIExportRequest(BaseModel):
-    """
-    Request to build a ComfyUI graph template from storyboard shots
-    and (optionally) precomputed FIBO payloads.
-
-    Typical caller (Streamlit UI) already has both shots + fibo_payloads, but
-    if fibo_payloads is omitted we recompute FIBO JSON using shot_to_fibo_struct.
-    """
+    """Request to build a ComfyUI graph template from storyboard shots."""
 
     shots: List[Dict[str, Any]]
     fibo_payloads: Optional[List[Dict[str, Any]]] = None
 
 
 class ComfyUIExportResponse(BaseModel):
-    """
-    Response wrapper around the ComfyUI graph JSON.
-
-    - graph: the full ComfyUI-style node graph (ready to save as JSON).
-    - num_shots: number of shots encoded into the graph.
-    - template_type/version: convenience mirror of graph-level metadata.
-    """
+    """Response wrapper around the ComfyUI graph JSON."""
 
     status: str
     message: str
@@ -456,15 +398,7 @@ def script_to_shots_with_cinematography(req: ScriptRequest) -> Dict[str, Any]:
 
 @app.post("/full-pipeline")
 def full_pipeline(req: ScriptRequest) -> Dict[str, Any]:
-    """Full JSON-native, agentic pipeline (no images).
-
-    Steps:
-      1. CreativeDirectorAgent  -> shot templates
-      2. CinematographyAgent    -> add camera + lighting
-      3. ContinuityAgent        -> enforce character & scene consistency
-      4. QualityControlAgent    -> generate QC report
-      5. ReviewerAgent          -> wrap report into review summary
-    """
+    """Full JSON-native, agentic pipeline (no images)."""
 
     # 1) shot breakdown
     shots_step1 = creative_director.script_to_shots(req.script_text)
@@ -497,11 +431,7 @@ def full_pipeline(req: ScriptRequest) -> Dict[str, Any]:
 
 @app.post("/full-pipeline-fibo-json")
 def full_pipeline_fibo_json(req: ScriptRequest) -> Dict[str, Any]:
-    """Full agent pipeline + FIBO JSON builder (no image rendering).
-
-    This is useful for debugging and for any external consumer that wants
-    the full Bria FIBO structured prompts for each shot.
-    """
+    """Full agent pipeline + FIBO JSON builder (no image rendering)."""
 
     # 1) shot breakdown
     shots_step1 = creative_director.script_to_shots(req.script_text)
@@ -546,18 +476,7 @@ def full_pipeline_fibo_json(req: ScriptRequest) -> Dict[str, Any]:
 
 @app.post("/full-pipeline-generate-images")
 def full_pipeline_generate_images(req: ScriptRequest) -> Dict[str, Any]:
-    """Full agent pipeline + FIBO JSON builder + Bria image generation.
-
-    - Runs all agents
-    - Builds FIBO JSON for each shot
-    - Calls FIBOBriaImageGenerator to create PNGs per shot in `generated/`
-
-    Advanced controllability (HDR, camera geometry, lighting blueprints,
-    film stock palettes, composition / pose presets, etc.) is encoded
-    inside the FIBO JSON by fibo_builder / shot_to_fibo_struct and then
-    interpreted inside FIBOBriaImageGenerator. This endpoint just
-    orchestrates.
-    """
+    """Full agent pipeline + FIBO JSON builder + Bria image generation."""
 
     # 1) shot breakdown
     shots_step1 = creative_director.script_to_shots(req.script_text)
@@ -574,7 +493,6 @@ def full_pipeline_generate_images(req: ScriptRequest) -> Dict[str, Any]:
     # 5) reviewer summary
     review = reviewer_agent.review(shots_step3, qc_report)
 
-    # 6) build FIBO JSON payloads + generate images via Bria
     fibo_payloads: List[Dict[str, Any]] = []
     image_results: List[Dict[str, Any]] = []
 
@@ -590,13 +508,8 @@ def full_pipeline_generate_images(req: ScriptRequest) -> Dict[str, Any]:
         )
 
         try:
-            # FIBOBriaImageGenerator internally reads HDR / controllability
-            # hints from fibo_json (hdr_mode, camera_preset,
-            # lighting_preset, film_palette, composition_preset,
-            # pose_blueprint, etc.).
             img_path = fibo_image_generator.generate_image_from_fibo_json(fibo_json)
         except Exception as exc:  # pragma: no cover - external service failure
-            # Bubble up as 502 because it's an upstream service error (Bria API)
             raise HTTPException(
                 status_code=502,
                 detail=(
@@ -634,15 +547,9 @@ def render_mv_endpoint(
     req: RenderMVRequest,
     background_tasks: BackgroundTasks,
 ) -> RenderMVResponse:
-    """Trigger music video rendering from mv_video_plan.json using local SVD.
-
-    On lightweight deployments (e.g., Streamlit Cloud) the local SVD stack
-    may be unavailable (no torch / GPU). In that case we return 501 and
-    the UI should fall back to `/render-mv-json` (external backend).
-    """
+    """Trigger music video rendering from mv_video_plan.json using local SVD."""
 
     if not HAS_LOCAL_SVD:
-        # No torch / diffusers etc: this deployment can't run local SVD.
         raise HTTPException(
             status_code=501,
             detail=(
@@ -662,7 +569,6 @@ def render_mv_endpoint(
     def _do_render() -> None:
         try:
             logger.info("Starting MV rendering job (local SVD)...")
-            # import here as well, just in case
             result = render_mv_from_plan(plan_path, GENERATED_DIR)  # type: ignore[arg-type]
             logger.info("MV rendering completed: %s", result)
         except Exception as e:  # pragma: no cover - logging only
@@ -679,6 +585,7 @@ def render_mv_endpoint(
         result=None,
     )
 
+
 # -------------------------------------------------------------------------
 # External video backend rendering from in-memory mv_video_plan (fal.ai)
 # -------------------------------------------------------------------------
@@ -688,25 +595,13 @@ def render_mv_endpoint(
 def render_mv_from_plan_endpoint(
     req: RenderMVFromPlanRequest,
 ) -> RenderMVFromPlanResponse:
-    """Delegate an mv_video_plan dict to the external video backend.
-
-    Currently this uses video_backend.render_music_video(...), which is
-    implemented via fal.ai's LongCat image-to-video endpoint. The backend
-    is expected to return:
-
-      - status
-      - message
-      - mv_url: final stitched MV URL (if applicable)
-      - clips: per-shot clip metadata (including video.url, etc.)
-    """
+    """Delegate an mv_video_plan dict to the external video backend."""
 
     try:
         result = render_music_video(req.plan)
     except Exception as e:  # pragma: no cover - defensive
-        # Wrap any unexpected error from the video backend
         raise HTTPException(status_code=500, detail=f"Video backend error: {e}")
 
-    # Optional: derive mv_url from the first clip if not explicitly provided
     mv_url = result.get("mv_url")
     clips = result.get("clips") or []
     if not mv_url and clips:
@@ -734,18 +629,8 @@ def render_mv_from_plan_endpoint(
 
 @app.post("/tools/bria/export-comfyui", response_model=ComfyUIExportResponse)
 def export_comfyui(req: ComfyUIExportRequest) -> ComfyUIExportResponse:
-    """
-    Build a ComfyUI graph template from storyboard shots + FIBO JSON.
+    """Build a ComfyUI graph template from storyboard shots + FIBO JSON."""
 
-    Typical usage from the Storyboard UI:
-      - Pass the current `shots` array and the `fibo_payloads` array
-        returned by /full-pipeline-fibo-json or /full-pipeline-generate-images.
-      - If fibo_payloads is omitted, we rebuild FIBO JSON from shots.
-
-    The result is:
-      - `graph`: a ComfyUI-style node graph dictionary
-      - also persisted to generated/comfyui/comfyui_graph.json
-    """
     shots = req.shots or []
     if not shots:
         raise HTTPException(status_code=400, detail="shots list is empty")
@@ -773,7 +658,6 @@ def export_comfyui(req: ComfyUIExportRequest) -> ComfyUIExportResponse:
             detail=f"Failed to build ComfyUI template: {e}",
         )
 
-    # Persist to disk so the user can easily download/import in ComfyUI
     out_dir = GENERATED_DIR / "comfyui"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "comfyui_graph.json"
@@ -802,12 +686,8 @@ def export_comfyui(req: ComfyUIExportRequest) -> ComfyUIExportResponse:
 
 @app.post("/tools/bria/upscale", response_model=ImageToolResponse)
 def bria_upscale(req: ImagePathRequest) -> ImageToolResponse:
-    """
-    Upscale an existing image on disk using Bria's Upscale API.
+    """Upscale an existing image on disk using Bria's Upscale API."""
 
-    If BRIA_USE_LOCAL_UPSCALE is set, uses the local PIL-based stub instead.
-    """
-    # Resolve to absolute path (allow both relative and absolute)
     if os.path.isabs(req.image_path):
         src_path = Path(req.image_path)
     else:
@@ -819,11 +699,11 @@ def bria_upscale(req: ImagePathRequest) -> ImageToolResponse:
     scale = req.scale or 2
 
     if BRIA_USE_LOCAL_UPSCALE:
-        # Use the local PIL-based stub
         try:
             out_path = _local_upscale(str(src_path), scale)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Local upscaler failed: {e}")
+
         try:
             rel_in = str(src_path.relative_to(ROOT))
         except ValueError:
@@ -832,38 +712,24 @@ def bria_upscale(req: ImagePathRequest) -> ImageToolResponse:
             rel_out = str(out_path.relative_to(ROOT))
         except ValueError:
             rel_out = str(out_path)
+
         return ImageToolResponse(
             tool="upscale_local",
             input_path=rel_in,
             output_path=rel_out,
         )
-    else:
-        # Use Bria's real HTTP API, but fallback to local if any error occurs
+
+    try:
+        out_bytes = upscale_image_file(src_path, scale=scale)
+    except Exception as e:
+        logger.warning("Bria upscale failed, falling back to local: %s", e)
         try:
-            out_bytes = upscale_image_file(src_path, scale=scale)
-        except Exception as e:
-            logger.warning("Bria upscale failed, falling back to local: %s", e)
-            try:
-                out_path = _local_upscale(str(src_path), scale)
-            except Exception as le:
-                raise HTTPException(status_code=500, detail=f"Local upscaler failed: {le}")
-            try:
-                rel_in = str(src_path.relative_to(ROOT))
-            except ValueError:
-                rel_in = str(src_path)
-            try:
-                rel_out = str(out_path.relative_to(ROOT))
-            except ValueError:
-                rel_out = str(out_path)
-            return ImageToolResponse(
-                tool="upscale_local",
-                input_path=rel_in,
-                output_path=rel_out,
+            out_path = _local_upscale(str(src_path), scale)
+        except Exception as le:
+            raise HTTPException(
+                status_code=500, detail=f"Local upscaler failed: {le}"
             )
-        # If Bria API succeeded
-        out_name = f"{src_path.stem}_x{scale}.png"
-        out_path = UPSCALED_DIR / out_name
-        out_path.write_bytes(out_bytes)
+
         try:
             rel_in = str(src_path.relative_to(ROOT))
         except ValueError:
@@ -872,20 +738,37 @@ def bria_upscale(req: ImagePathRequest) -> ImageToolResponse:
             rel_out = str(out_path.relative_to(ROOT))
         except ValueError:
             rel_out = str(out_path)
+
         return ImageToolResponse(
-            tool="upscale",
+            tool="upscale_local",
             input_path=rel_in,
             output_path=rel_out,
         )
 
+    out_name = f"{src_path.stem}_x{scale}.png"
+    out_path = UPSCALED_DIR / out_name
+    out_path.write_bytes(out_bytes)
+
+    try:
+        rel_in = str(src_path.relative_to(ROOT))
+    except ValueError:
+        rel_in = str(src_path)
+    try:
+        rel_out = str(out_path.relative_to(ROOT))
+    except ValueError:
+        rel_out = str(out_path)
+
+    return ImageToolResponse(
+        tool="upscale",
+        input_path=rel_in,
+        output_path=rel_out,
+    )
+
 
 @app.post("/tools/bria/rmbg", response_model=ImageToolResponse)
 def bria_rmbg(req: ImagePathRequest) -> ImageToolResponse:
-    """
-    Remove background from an existing image on disk via Bria RMBG API.
+    """Remove background from an existing image via Bria RMBG API."""
 
-    The `scale` field is ignored for now but kept in the schema for symmetry.
-    """
     if os.path.isabs(req.image_path):
         src_path = Path(req.image_path)
     else:
@@ -912,7 +795,6 @@ def bria_rmbg(req: ImagePathRequest) -> ImageToolResponse:
         rel_in = str(src_path.relative_to(ROOT))
     except ValueError:
         rel_in = str(src_path)
-
     try:
         rel_out = str(out_path.relative_to(ROOT))
     except ValueError:
@@ -931,14 +813,10 @@ def bria_rmbg(req: ImagePathRequest) -> ImageToolResponse:
 
 
 @app.post("/tools/gemini/annotate-character", response_model=CharacterAnnotateResponse)
-def gemini_annotate_character(req: CharacterAnnotateRequest) -> CharacterAnnotateResponse:
-    """Run Gemini 2.5 Pro over a single frame to annotate the main character.
-
-    This endpoint returns a structured JSON annotation that includes
-    face bounding box, clothing, props, expression, pose, and
-    continuity_tags so the Continuity Inspector can track character
-    consistency across shots.
-    """
+def gemini_annotate_character(
+    req: CharacterAnnotateRequest,
+) -> CharacterAnnotateResponse:
+    """Run Gemini 2.5 Pro over a single frame to annotate the main character."""
 
     if not HAS_GEMINI:
         raise HTTPException(
@@ -950,7 +828,6 @@ def gemini_annotate_character(req: CharacterAnnotateRequest) -> CharacterAnnotat
             ),
         )
 
-    # Resolve image path against project root if needed
     if os.path.isabs(req.image_path):
         src_path = Path(req.image_path)
     else:
@@ -968,26 +845,23 @@ def gemini_annotate_character(req: CharacterAnnotateRequest) -> CharacterAnnotat
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:
-        # Most likely missing GEMINI_API_KEY or auth misconfiguration
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:  # pragma: no cover - defensive
         logging.exception("Gemini annotation failed: %s", e)
         raise HTTPException(status_code=500, detail=f"Gemini annotation failed: {e}")
 
-    # CharacterAnnotation is a Pydantic model; convert to raw dict
-    annotation_dict: Dict[str, Any] = ann_model.dict() if ann_model is not None else {}
-
+    annotation_dict = _model_to_dict(ann_model)
     return CharacterAnnotateResponse(status="ok", annotation=annotation_dict)
 
 
-@app.post("/tools/gemini/annotate-character-batch", response_model=List[CharacterAnnotateResponse])
+@app.post(
+    "/tools/gemini/annotate-character-batch",
+    response_model=List[CharacterAnnotateResponse],
+)
 def gemini_annotate_character_batch(
     req: CharacterAnnotateBatchRequest,
 ) -> List[CharacterAnnotateResponse]:
-    """Batch Gemini character annotation for multiple frames.
-
-    The UI can use this to score continuity across a sequence of shots.
-    """
+    """Batch Gemini character annotation for multiple frames."""
 
     if not HAS_GEMINI:
         raise HTTPException(
@@ -1002,7 +876,6 @@ def gemini_annotate_character_batch(
     if not req.items:
         raise HTTPException(status_code=400, detail="items list is empty")
 
-    # Resolve paths first
     paths: List[str] = []
     shot_ids: List[Optional[str]] = []
     prompts: List[Optional[str]] = []
@@ -1030,32 +903,25 @@ def gemini_annotate_character_batch(
 
     responses: List[CharacterAnnotateResponse] = []
     for ann in ann_models:
-        annotation_dict: Dict[str, Any] = ann.dict() if ann is not None else {}
-        responses.append(
-            CharacterAnnotateResponse(status="ok", annotation=annotation_dict)
-        )
+        annotation_dict = _model_to_dict(ann)
+        responses.append(CharacterAnnotateResponse(status="ok", annotation=annotation_dict))
 
     return responses
 
 
 # -------------------------------------------------------------------------
-# Gemini continuity endpoint for Streamlit UI (/tools/gemini/character-continuity)
+# Gemini continuity endpoint for Streamlit UI
 # -------------------------------------------------------------------------
 
-@app.post("/tools/gemini/character-continuity", response_model=CharacterContinuityResponse)
-def gemini_character_continuity(req: CharacterContinuityRequest) -> CharacterContinuityResponse:
-    """
-    High-level Gemini 2.5 Pro continuity endpoint used by the Streamlit UI.
 
-    The UI sends parallel lists of image_paths / shot_ids / scene_prompts.
-    We:
-      - resolve all paths relative to the project root,
-      - call the lower-level annotate_batch(...) helper, and
-      - return a flat list of JSON-serializable annotations.
-
-    This endpoint is what storyboard_app.py calls at:
-        /tools/gemini/character-continuity
-    """
+@app.post(
+    "/tools/gemini/character-continuity",
+    response_model=CharacterContinuityResponse,
+)
+def gemini_character_continuity(
+    req: CharacterContinuityRequest,
+) -> CharacterContinuityResponse:
+    """High-level Gemini 2.5 Pro continuity endpoint used by the Streamlit UI."""
 
     if not HAS_GEMINI:
         raise HTTPException(
@@ -1070,10 +936,13 @@ def gemini_character_continuity(req: CharacterContinuityRequest) -> CharacterCon
     if not req.image_paths:
         raise HTTPException(status_code=400, detail="image_paths list is empty")
 
-    # Normalize optional lists so we can index into them safely
     num_items = len(req.image_paths)
-    shot_ids = (req.shot_ids or []) + [None] * max(0, num_items - len(req.shot_ids or []))
-    scene_prompts = (req.scene_prompts or []) + [None] * max(0, num_items - len(req.scene_prompts or []))
+    shot_ids_list = (req.shot_ids or []) + [None] * max(
+        0, num_items - len(req.shot_ids or [])
+    )
+    scene_prompts_list = (req.scene_prompts or []) + [None] * max(
+        0, num_items - len(req.scene_prompts or [])
+    )
 
     resolved_paths: List[str] = []
     used_shot_ids: List[Optional[str]] = []
@@ -1088,8 +957,8 @@ def gemini_character_continuity(req: CharacterContinuityRequest) -> CharacterCon
         if not p.exists():
             raise HTTPException(status_code=404, detail=f"Image not found: {p}")
         resolved_paths.append(str(p))
-        used_shot_ids.append(shot_ids[idx])
-        used_prompts.append(scene_prompts[idx])
+        used_shot_ids.append(shot_ids_list[idx])
+        used_prompts.append(scene_prompts_list[idx])
 
     try:
         ann_models = annotate_batch(
@@ -1108,6 +977,6 @@ def gemini_character_continuity(req: CharacterContinuityRequest) -> CharacterCon
 
     annotations: List[Dict[str, Any]] = []
     for ann in ann_models:
-        annotations.append(ann.dict() if ann is not None else {})
+        annotations.append(_model_to_dict(ann))
 
     return CharacterContinuityResponse(status="ok", annotations=annotations)
