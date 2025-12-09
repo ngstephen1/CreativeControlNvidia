@@ -22,6 +22,12 @@ from video.svd_renderer import render_mv_from_plan
 # External video backend (fal.ai LongCat image→video) used by /render-mv-json
 from video.video_backend import render_music_video
 
+# Bria HTTP tools (Upscale + RMBG via Bria APIs; no local GPU)
+from .bria_tools import (
+    upscale_image_file,
+    rmbg_image_file,
+    BriaConfigError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +59,14 @@ qc_agent = QualityControlAgent()
 reviewer_agent = ReviewerAgent()
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# Core generated directory + tool-specific subfolders
 GENERATED_DIR = ROOT / "generated"
-GENERATED_DIR.mkdir(exist_ok=True, parents=True)
+UPSCALED_DIR = GENERATED_DIR / "upscaled"
+RMBG_DIR = GENERATED_DIR / "rmbg"
+
+for d in (GENERATED_DIR, UPSCALED_DIR, RMBG_DIR):
+    d.mkdir(exist_ok=True, parents=True)
 
 # FIBO → Bria image generator
 # All advanced controllability (HDR / 16-bit intent, camera geometry,
@@ -152,6 +164,23 @@ class RenderMVFromPlanResponse(BaseModel):
     clips: Optional[List[Dict[str, Any]]] = None
     backend: Optional[str] = None
     num_clips: Optional[int] = None
+
+
+class ImagePathRequest(BaseModel):
+    """Request payload for Bria Upscale / RMBG tools.
+
+    image_path: relative to repo root or absolute path.
+    scale: optional scale factor (for Upscale only).
+    """
+
+    image_path: str
+    scale: Optional[int] = 2
+
+
+class ImageToolResponse(BaseModel):
+    tool: str
+    input_path: str
+    output_path: str
 
 
 # -------------------------------------------------------------------------
@@ -458,4 +487,115 @@ def render_mv_from_plan_endpoint(
         clips=clips,
         backend=result.get("backend"),
         num_clips=result.get("num_clips"),
+    )
+
+
+# -------------------------------------------------------------------------
+# Bria HTTP tools: Upscale + RMBG (no local GPU)
+# -------------------------------------------------------------------------
+
+
+@app.post("/tools/bria/upscale", response_model=ImageToolResponse)
+def bria_upscale(req: ImagePathRequest) -> ImageToolResponse:
+    """
+    Upscale an existing image on disk using Bria's Upscale API.
+
+    Request:
+        {
+          "image_path": "generated/storyboard/shot_001.png",
+          "scale": 2
+        }
+
+    Response:
+        {
+          "tool": "upscale",
+          "input_path": "...",
+          "output_path": "generated/upscaled/shot_001_x2.png"
+        }
+    """
+    # Resolve to absolute path (allow both relative and absolute)
+    if os.path.isabs(req.image_path):
+        src_path = Path(req.image_path)
+    else:
+        src_path = (ROOT / req.image_path).resolve()
+
+    if not src_path.exists():
+        raise HTTPException(status_code=404, detail=f"Image not found: {src_path}")
+
+    scale = req.scale or 2
+
+    try:
+        out_bytes = upscale_image_file(src_path, scale=scale)
+    except BriaConfigError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Bria Upscale API failed: {e}",
+        )
+
+    out_name = f"{src_path.stem}_x{scale}.png"
+    out_path = UPSCALED_DIR / out_name
+    out_path.write_bytes(out_bytes)
+
+    try:
+        rel_in = str(src_path.relative_to(ROOT))
+    except ValueError:
+        rel_in = str(src_path)
+
+    try:
+        rel_out = str(out_path.relative_to(ROOT))
+    except ValueError:
+        rel_out = str(out_path)
+
+    return ImageToolResponse(
+        tool="upscale",
+        input_path=rel_in,
+        output_path=rel_out,
+    )
+
+
+@app.post("/tools/bria/rmbg", response_model=ImageToolResponse)
+def bria_rmbg(req: ImagePathRequest) -> ImageToolResponse:
+    """
+    Remove background from an existing image on disk via Bria RMBG API.
+
+    The `scale` field is ignored for now but kept in the schema for symmetry.
+    """
+    if os.path.isabs(req.image_path):
+        src_path = Path(req.image_path)
+    else:
+        src_path = (ROOT / req.image_path).resolve()
+
+    if not src_path.exists():
+        raise HTTPException(status_code=404, detail=f"Image not found: {src_path}")
+
+    try:
+        out_bytes = rmbg_image_file(src_path)
+    except BriaConfigError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Bria RMBG API failed: {e}",
+        )
+
+    out_name = f"{src_path.stem}_rmbg.png"
+    out_path = RMBG_DIR / out_name
+    out_path.write_bytes(out_bytes)
+
+    try:
+        rel_in = str(src_path.relative_to(ROOT))
+    except ValueError:
+        rel_in = str(src_path)
+
+    try:
+        rel_out = str(out_path.relative_to(ROOT))
+    except ValueError:
+        rel_out = str(out_path)
+
+    return ImageToolResponse(
+        tool="rmbg",
+        input_path=rel_in,
+        output_path=rel_out,
     )
