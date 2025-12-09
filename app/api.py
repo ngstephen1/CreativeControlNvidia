@@ -16,28 +16,12 @@ from agents.reviewer_agent import ReviewerAgent
 
 import fibo.fibo_builder as fibo_builder
 
-# Gemini character continuity annotator (vision + JSON)
-try:
-    from gemini.character_annotator import (
-        annotate_character_image,
-        annotate_batch,
-        CharacterAnnotation,
-    )
-
-    HAS_GEMINI = True
-except Exception:  # pragma: no cover - optional dependency
-    HAS_GEMINI = False
-    annotate_character_image = None  # type: ignore[assignment]
-    annotate_batch = None  # type: ignore[assignment]
-    CharacterAnnotation = None  # type: ignore[assignment]
-
 from fibo.image_generator_bria import FIBOBriaImageGenerator
 from PIL import Image, ImageFilter, ImageEnhance
 
 # Local SVD renderer (optional; used by /render-mv)
 try:
     from video.svd_renderer import render_mv_from_plan  # type: ignore
-
     HAS_LOCAL_SVD = True
 except Exception:
     # On Streamlit Cloud (or minimal installs) torch/diffusers may not be present.
@@ -55,9 +39,9 @@ from .bria_tools import (
     BriaConfigError,
 )
 
-
 logger = logging.getLogger(__name__)
 
+#
 # -------------------------------------------------------------------------
 # Environment / API key setup
 # -------------------------------------------------------------------------
@@ -80,6 +64,24 @@ BRIA_USE_LOCAL_UPSCALE = os.getenv("BRIA_USE_LOCAL_UPSCALE", "0").strip() in {
     "true",
     "True",
 }
+
+# Gemini character continuity annotator (vision + JSON)
+GEMINI_IMPORT_ERROR: Optional[str] = None
+try:
+    from gemini.character_annotator import (
+        annotate_character_image,
+        annotate_batch,
+        CharacterAnnotation,
+    )
+    HAS_GEMINI = True
+    logger.info("Gemini annotator loaded successfully.")
+except Exception as e:  # pragma: no cover - optional dependency
+    HAS_GEMINI = False
+    GEMINI_IMPORT_ERROR = str(e)
+    logger.exception("Gemini annotator import failed: %s", e)
+    annotate_character_image = None  # type: ignore[assignment]
+    annotate_batch = None  # type: ignore[assignment]
+    CharacterAnnotation = None  # type: ignore[assignment]
 
 # -------------------------------------------------------------------------
 # FastAPI app + agent singletons
@@ -355,16 +357,28 @@ class ComfyUIExportResponse(BaseModel):
     version: Optional[str] = None
 
 
+#
 # -------------------------------------------------------------------------
-# Health check
+# Health + debug
 # -------------------------------------------------------------------------
 
 
 @app.get("/health")
 def health() -> Dict[str, str]:
     """Simple health check for monitoring / liveness probes."""
-
     return {"status": "ok"}
+
+
+@app.get("/debug/gemini-status")
+def debug_gemini_status() -> Dict[str, Any]:
+    """
+    Lightweight debug endpoint to see whether Gemini is available
+    on this deployment (useful for Render / cloud debugging).
+    """
+    return {
+        "has_gemini": HAS_GEMINI,
+        "import_error": GEMINI_IMPORT_ERROR,
+    }
 
 
 # -------------------------------------------------------------------------
@@ -847,7 +861,7 @@ def gemini_annotate_character(
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:  # pragma: no cover - defensive
-        logging.exception("Gemini annotation failed: %s", e)
+        logger.exception("Gemini annotation failed: %s", e)
         raise HTTPException(status_code=500, detail=f"Gemini annotation failed: {e}")
 
     annotation_dict = _model_to_dict(ann_model)
@@ -895,7 +909,7 @@ def gemini_annotate_character_batch(
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:  # pragma: no cover - defensive
-        logging.exception("Gemini batch annotation failed: %s", e)
+        logger.exception("Gemini batch annotation failed: %s", e)
         raise HTTPException(
             status_code=500,
             detail=f"Gemini batch annotation failed: {e}",
@@ -969,7 +983,7 @@ def gemini_character_continuity(
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:  # pragma: no cover - defensive
-        logging.exception("Gemini continuity endpoint failed: %s", e)
+        logger.exception("Gemini continuity endpoint failed: %s", e)
         raise HTTPException(
             status_code=500,
             detail=f"Gemini continuity endpoint failed: {e}",
