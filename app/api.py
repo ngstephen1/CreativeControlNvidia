@@ -18,7 +18,14 @@ import fibo.fibo_builder as fibo_builder
 from fibo.image_generator_bria import FIBOBriaImageGenerator
 from PIL import Image, ImageFilter, ImageEnhance
 # Local SVD renderer (optional; used by /render-mv)
-from video.svd_renderer import render_mv_from_plan
+try:
+    from video.svd_renderer import render_mv_from_plan  # type: ignore
+    HAS_LOCAL_SVD = True
+except Exception:
+    # On Streamlit Cloud (or minimal installs) torch/diffusers may not be present.
+    # We still want the app to boot; /render-mv will just be disabled.
+    HAS_LOCAL_SVD = False
+    render_mv_from_plan = None  # type: ignore
 
 # External video backend (fal.ai LongCat image→video) used by /render-mv-json
 from video.video_backend import render_music_video
@@ -540,15 +547,22 @@ def render_mv_endpoint(
     req: RenderMVRequest,
     background_tasks: BackgroundTasks,
 ) -> RenderMVResponse:
-    """Trigger music video rendering from mv_video_plan.json using SVD.
+    """Trigger music video rendering from mv_video_plan.json using local SVD.
 
-    This will:
-      - Load the plan JSON (script→shots→images→mv_video_plan.json)
-      - Render per-shot clips with Stable Video Diffusion
-      - Concatenate them into generated/final_music_video.mp4
-
-    The heavy work runs in a background task so the request returns quickly.
+    On lightweight deployments (e.g., Streamlit Cloud) the local SVD stack
+    may be unavailable (no torch / GPU). In that case we return 501 and
+    the UI should fall back to `/render-mv-json` (external backend).
     """
+
+    if not HAS_LOCAL_SVD:
+        # No torch / diffusers etc: this deployment can't run local SVD.
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "Local SVD renderer is not available on this deployment "
+                "(missing torch/diffusers). Use /render-mv-json instead."
+            ),
+        )
 
     plan_path = ROOT / req.plan_path
 
@@ -561,7 +575,8 @@ def render_mv_endpoint(
     def _do_render() -> None:
         try:
             logger.info("Starting MV rendering job (local SVD)...")
-            result = render_mv_from_plan(plan_path, GENERATED_DIR)
+            # import here as well, just in case
+            result = render_mv_from_plan(plan_path, GENERATED_DIR)  # type: ignore[arg-type]
             logger.info("MV rendering completed: %s", result)
         except Exception as e:  # pragma: no cover - logging only
             logger.exception("Error in MV rendering background task: %s", e)
@@ -572,11 +587,10 @@ def render_mv_endpoint(
         status="started",
         message=(
             "Music video rendering started on backend (local SVD). "
-            "Refresh the Streamlit UI after some time to see clips and the final MV."
+            "On this machine it may take several minutes."
         ),
         result=None,
     )
-
 
 # -------------------------------------------------------------------------
 # External video backend rendering from in-memory mv_video_plan (fal.ai)
