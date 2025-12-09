@@ -15,6 +15,15 @@ import streamlit as st
 from dotenv import load_dotenv
 from PIL import Image, ImageDraw  # for composition overlays and Gemini bounding boxes
 
+# Optional Gemini annotator (local vision continuity)
+try:
+    from gemini.character_annotator import annotate_batch  # type: ignore
+
+    HAS_GEMINI = True
+except Exception:
+    annotate_batch = None  # type: ignore[assignment]
+    HAS_GEMINI = False
+
 # -------------------------------------------------
 # Bootstrap: paths + env
 # -------------------------------------------------
@@ -60,7 +69,6 @@ from app.api import (  # type: ignore[import]
     fibo_builder,
     fibo_image_generator,
 )
-
 
 # -------------------------------------------------
 # Helper functions
@@ -904,7 +912,7 @@ def main() -> None:
         st.write("No continuity data available yet – generate a storyboard first.")
 
     # ========================
-    # Gemini Character Continuity (vision)
+    # Gemini Character Continuity (vision – local Gemini 2.5 Pro)
     # ========================
     st.markdown("### 😁 Gemini Character Continuity (beta)")
     st.caption(
@@ -912,16 +920,20 @@ def main() -> None:
         "across all frames, so you can spot continuity breaks at a glance."
     )
 
-    backend_base = st.session_state.get("backend_base", RENDER_BACKEND_BASE)
-
+    # Map of shot_id -> frame path that we saved during storyboard generation
     frames_map: Dict[str, str] = st.session_state.get("gemini_frames", {})
     existing_ann: List[Dict[str, Any]] = st.session_state.get("gemini_annotations", [])
 
     col_btn, _ = st.columns([1, 3])
     with col_btn:
         if st.button("Let's Analyze Continuity!"):
-            # We'll send the frame paths + shot IDs we know
-            if not frames_map:
+            if not HAS_GEMINI or annotate_batch is None:
+                st.error(
+                    "Gemini annotator is not available in this environment.\n\n"
+                    "Make sure `google-generativeai` is installed and `GEMINI_API_KEY` "
+                    "is set in your Streamlit deployment."
+                )
+            elif not frames_map:
                 st.warning(
                     "No frames found for Gemini analysis. Generate a storyboard first."
                 )
@@ -929,28 +941,38 @@ def main() -> None:
                 shot_ids = list(frames_map.keys())
                 frame_paths = [frames_map[sid] for sid in shot_ids]
 
-                url = f"{backend_base.rstrip('/')}/tools/gemini/character-continuity"
-                payload = {
-                    "image_paths": frame_paths,
-                    "shot_ids": shot_ids,
-                    "scene_prompts": [None] * len(frame_paths),
-                }
+                # Resolve to absolute paths on the Streamlit filesystem
+                abs_paths: List[str] = []
+                for p in frame_paths:
+                    pth = Path(p)
+                    if not pth.is_absolute():
+                        pth = Path(".").resolve() / p
+                    abs_paths.append(str(pth))
 
-                try:
-                    resp = requests.post(url, json=payload, timeout=120)
-                    if resp.status_code != 200:
-                        st.error(
-                            f"Gemini continuity endpoint failed ({resp.status_code}) for URL {url}: {resp.text}"
+                with st.spinner("Running Gemini continuity analysis..."):
+                    try:
+                        ann_models = annotate_batch(
+                            abs_paths,
+                            shot_ids=shot_ids,
+                            scene_prompts=[None] * len(abs_paths),
                         )
+                    except Exception as exc:
+                        st.error(f"Gemini continuity analysis failed: {exc}")
                     else:
-                        data = resp.json()
-                        anns = data.get("annotations", [])
+                        anns: List[Dict[str, Any]] = []
+                        for ann in ann_models:
+                            if hasattr(ann, "model_dump"):
+                                anns.append(ann.model_dump())
+                            elif hasattr(ann, "dict"):
+                                anns.append(ann.dict())
+                            else:
+                                anns.append(dict(ann))  # type: ignore[arg-type]
+
                         st.session_state["gemini_annotations"] = anns
                         existing_ann = anns
                         st.success("Gemini continuity analysis complete! ✅")
-                except Exception as exc:
-                    st.error(f"Gemini continuity request failed: {exc}")
 
+    # ---------- Display Gemini results ----------
     if not existing_ann:
         st.info("Run continuity analysis to see annotations.")
     else:
@@ -999,9 +1021,7 @@ def main() -> None:
             frame_path = frames_map[selected_shot_id]
         elif shot_labels and not selected_shot_id:
             # fall back: match by order
-            # (only if we didn't get a shot_id back from Gemini)
             idx = shot_labels.index(selected_label)
-            # align index with frames_map order
             frame_path = list(frames_map.values())[idx] if frames_map else None
 
         if frame_path and os.path.exists(frame_path):
@@ -1016,10 +1036,8 @@ def main() -> None:
                     y = bbox.get("y", 0)
                     w = bbox.get("width", 0)
                     h = bbox.get("height", 0)
-                    # convert to bottom-right coords
                     x2, y2 = x + w, y + h
 
-                    # primary face box
                     draw.rectangle([x, y, x2, y2], outline="red", width=4)
 
                 st.image(
