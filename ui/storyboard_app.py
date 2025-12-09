@@ -855,18 +855,32 @@ def main() -> None:
         aesth = fibo.get("aesthetics", {})
         env = shot.get("environment", {})
 
+        hdr_mode = fibo.get("hdr_mode", "off")
+        lighting_blueprint = fibo.get("lighting_blueprint", "default")
+        film_stock = fibo.get("film_stock", "none")
+        camera_angle = pc.get("camera_angle", "")
+
+        dsl_summary = (
+            f"S{scene_id}–{shot_id_str} | "
+            f"angle={camera_angle or 'eye-level'} | "
+            f"hdr={hdr_mode} | "
+            f"light={lighting_blueprint} | "
+            f"film={film_stock}"
+        )
+
         continuity_rows.append(
             {
                 "Scene": scene_id,
                 "Shot": shot_id_str,
-                "Camera angle": pc.get("camera_angle", ""),
+                "Camera angle": camera_angle,
                 "Lens / FOV": pc.get("lens_focal_length", ""),
-                "HDR mode": fibo.get("hdr_mode", "off"),
-                "Lighting blueprint": fibo.get("lighting_blueprint", "default"),
-                "Film stock": fibo.get("film_stock", "none"),
+                "HDR mode": hdr_mode,
+                "Lighting blueprint": lighting_blueprint,
+                "Film stock": film_stock,
                 "Mood": aesth.get("mood_atmosphere", ""),
                 "Color scheme": aesth.get("color_scheme", ""),
                 "Location": env.get("location", ""),
+                "DSL summary": dsl_summary,
             }
         )
 
@@ -931,6 +945,59 @@ def main() -> None:
                         st.warning("Backend did not return an 'mv_url' field.")
             except Exception as e:
                 st.error(f"Error calling backend: {e}")
+
+    # -------------------------------------------------
+    # ComfyUI export – FIBO → node graph
+    # -------------------------------------------------
+    st.markdown("---")
+    st.subheader("🧩 ComfyUI Export")
+
+    st.caption(
+        "Export your current storyboard + FIBO JSON as a ComfyUI node graph so you can "
+        "wire it into your own workflows (LoRA, ControlNet, etc.)."
+    )
+
+    comfy_graph = st.session_state.get("comfyui_graph")
+
+    if st.button("📤 Export to ComfyUI graph", key="btn_export_comfyui"):
+        with st.spinner("Building ComfyUI graph via FastAPI…"):
+            try:
+                resp = requests.post(
+                    f"{RENDER_BACKEND_BASE.rstrip('/')}/tools/bria/export-comfyui",
+                    json={
+                        "shots": shots,
+                        "fibo_payloads": fibo_payloads,
+                    },
+                    timeout=120,
+                )
+                if resp.status_code != 200:
+                    st.error(
+                        f"ComfyUI export failed: {resp.status_code} {resp.text[:400]}"
+                    )
+                else:
+                    data = resp.json()
+                    comfy_graph = data.get("graph", {})
+                    st.session_state["comfyui_graph"] = comfy_graph
+                    st.success("ComfyUI graph template built!")
+            except Exception as e:
+                st.error(f"Error calling /tools/bria/export-comfyui: {e}")
+                comfy_graph = None
+
+    if comfy_graph:
+        graph_bytes = json.dumps(comfy_graph, indent=2).encode("utf-8")
+        st.download_button(
+            "⬇️ Download comfyui_graph.json",
+            data=graph_bytes,
+            file_name="comfyui_graph.json",
+            mime="application/json",
+            key="download_comfyui_graph",
+        )
+        with st.expander("Preview ComfyUI graph JSON"):
+            st.json(comfy_graph)
+    else:
+        st.caption(
+            "No ComfyUI graph yet. Click 'Export to ComfyUI graph' to generate one."
+        )
 
     # -------------------------------------------------
     # Shot Asset Lab – RMBG, enhance, background variants
@@ -1013,6 +1080,65 @@ def main() -> None:
                 use_container_width=True,
                 caption="Enhanced foreground (2MP)",
             )
+
+        st.markdown("**Bria Upscale (side‑by‑side)**")
+        upscale_scale = st.selectbox(
+            "Upscale factor",
+            [2, 4],
+            index=0,
+            key="asset_lab_upscale_scale",
+        )
+
+        if st.button("🔍 Upscale this shot", key="btn_bria_upscale"):
+            base_for_upscale = enhanced_path or selected_image_path
+            if not base_for_upscale or not os.path.exists(base_for_upscale):
+                st.error("No image available to upscale.")
+            else:
+                try:
+                    # Call FastAPI local upscaler stub (no external GPU / Bria HTTP needed)
+                    rel_path = (
+                        str(Path(base_for_upscale).relative_to(ROOT))
+                        if base_for_upscale.startswith(str(ROOT))
+                        else base_for_upscale
+                    )
+                    with st.spinner("Calling /tools/bria/upscale-local…"):
+                        resp = requests.post(
+                            f"{RENDER_BACKEND_BASE.rstrip('/')}/tools/bria/upscale-local",
+                            json={
+                                "image_path": rel_path,
+                                "scale": upscale_scale,
+                            },
+                            timeout=300,
+                        )
+                    if resp.status_code != 200:
+                        st.error(
+                            f"Upscale failed: {resp.status_code} {resp.text[:400]}"
+                        )
+                    else:
+                        data = resp.json()
+                        out_rel = data.get("output_path", rel_path)
+                        upscaled_path = str((ROOT / out_rel).resolve())
+                        st.session_state["asset_lab_upscaled_path"] = upscaled_path
+                        st.success("Upscaled image generated!")
+                except Exception as e:
+                    st.error(f"Error calling upscale endpoint: {e}")
+
+        upscaled_path = st.session_state.get("asset_lab_upscaled_path")
+        if upscaled_path and os.path.exists(upscaled_path):
+            side_cols = st.columns(2)
+            with side_cols[0]:
+                if os.path.exists(selected_image_path):
+                    st.image(
+                        selected_image_path,
+                        use_container_width=True,
+                        caption="Original",
+                    )
+            with side_cols[1]:
+                st.image(
+                    upscaled_path,
+                    use_container_width=True,
+                    caption=f"Upscaled ×{upscale_scale}",
+                )
 
         st.markdown("**Background variants (Replace Background)**")
         bg_prompt = st.text_input(

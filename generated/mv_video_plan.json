@@ -1,64 +1,64 @@
 {
   "project_type": "music_video",
   "video_backend": "svd",
-  "created_at": "2025-12-07T16:18:28.177446Z",
+  "created_at": "2025-12-09T07:46:46.910281Z",
   "total_shots": 7,
   "shots": [
     {
       "scene": 1,
       "shot_id": "S1_SHOT1",
-      "description": "Night rain on the city. A single violinist plays under a street lamp while cars pass in the distance.",
-      "duration_sec": 4.0,
-      "motion_style": "slow_cinematic_push_in",
-      "image_path": "generated/fibo_5d8dd7901cfc48f8aace555065f2c51f.png"
+      "description": "Night rain on the city. A young Asian male violinist in his mid-20s, with medium-length black hair tucked behind his ears, warm brown eyes, a slim calm face, wearing a dark navy coat and a charcoal grey scarf, holding a worn reddish-brown wooden violin, plays under a street lamp while cars pass in the distance.",
+      "duration_sec": 2.0,
+      "motion_style": "slow_dolly_out",
+      "image_path": "/Users/macbook/Desktop/FPTAI/CreativeControlNvidia/generated/fibo_41634e4b68a54e14865026dd25c5e3cc.png"
     },
     {
       "scene": 2,
       "shot_id": "S2_SHOT2",
-      "description": "Closer shot of the violinist\u2019s face, eyes closed, raindrops on the instrument, soft neon reflections in the puddles.",
-      "duration_sec": 4.0,
-      "motion_style": "slow_cinematic_push_in",
-      "image_path": "generated/fibo_0106fc4e040b4a198872d394168c4bce.png"
+      "description": "Closer shot of the same young Asian male violinist in his mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf, holding the same reddish-brown violin. His eyes are closed, raindrops fall onto the instrument, and neon reflections shimmer in puddles beneath him.",
+      "duration_sec": 2.0,
+      "motion_style": "handheld_drift",
+      "image_path": "/Users/macbook/Desktop/FPTAI/CreativeControlNvidia/generated/fibo_45fa587564824cde8805612a610d0765.png"
     },
     {
       "scene": 3,
       "shot_id": "S3_SHOT3",
-      "description": "The next morning, the violinist rides a tram through the city, watching the world pass by the window in slow motion.",
-      "duration_sec": 4.0,
-      "motion_style": "slow_cinematic_push_in",
-      "image_path": "generated/fibo_1a098588052840beb78198339e4e7957.png"
+      "description": "The next morning, the young Asian male violinist (mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf) rides a tram through the city with his reddish-brown violin resting beside him, watching the world pass by the window in slow motion.",
+      "duration_sec": 2.0,
+      "motion_style": "slow_dolly_out",
+      "image_path": "/Users/macbook/Desktop/FPTAI/CreativeControlNvidia/generated/fibo_b805e81d77bd4e818de07b2315abe809.png"
     },
     {
       "scene": 4,
       "shot_id": "S4_SHOT4",
-      "description": "Inside a quiet cafe, the violinist sits by the window, notebook open, sketching music ideas on paper.",
-      "duration_sec": 4.0,
-      "motion_style": "slow_cinematic_push_in",
-      "image_path": "generated/fibo_8ddd70b8b8114502b8f7e50f8f4ed7e1.png"
+      "description": "Inside a quiet cafe, the young Asian male violinist (mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf) sits by a fogged window with his reddish-brown violin, notebook open, sketching new music ideas.",
+      "duration_sec": 2.0,
+      "motion_style": "handheld_drift",
+      "image_path": "/Users/macbook/Desktop/FPTAI/CreativeControlNvidia/generated/fibo_4234025388084a06a190d305cf706a80.png"
     },
     {
       "scene": 5,
       "shot_id": "S5_SHOT5",
-      "description": "Evening rooftop performance with a small crowd gathered, string lights overhead, city skyline in the background.",
-      "duration_sec": 4.0,
-      "motion_style": "slow_cinematic_push_in",
-      "image_path": "generated/fibo_7499d06508744bab9a70d0502ab5067d.png"
+      "description": "Evening rooftop performance. The young Asian male violinist (mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf) plays his reddish-brown violin for a small crowd under warm string lights, with the glowing city skyline behind him.",
+      "duration_sec": 2.0,
+      "motion_style": "handheld_drift",
+      "image_path": "/Users/macbook/Desktop/FPTAI/CreativeControlNvidia/generated/fibo_dcd8a201887241f69b5e0b11682c5a4b.png"
     },
     {
       "scene": 6,
       "shot_id": "S6_SHOT6",
-      "description": "Montage of hands on strings, city lights blurring in bokeh, silhouettes walking in the rain, and the violinist smiling at the camera.",
-      "duration_sec": 4.0,
-      "motion_style": "slow_cinematic_push_in",
-      "image_path": "generated/fibo_3bbc8c4ccd044848bccd4f411407c0eb.png"
+      "description": "Montage of the young Asian male violinist (mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf) and his reddish-brown violin: close-ups of his hands on the strings, blurred city lights, silhouettes walking in the rain, and a gentle smile toward the camera.",
+      "duration_sec": 2.0,
+      "motion_style": "slow_dolly_out",
+      "image_path": "/Users/macbook/Desktop/FPTAI/CreativeControlNvidia/generated/fibo_a11e7a7c97514e1b8f574f6a95de6165.png"
     },
     {
       "scene": 7,
       "shot_id": "S7_SHOT7",
-      "description": "Final wide shot of the city at blue hour, the violinist standing on a bridge, music echoing as cars stream by in light trails.",
-      "duration_sec": 4.0,
-      "motion_style": "slow_cinematic_push_in",
-      "image_path": "generated/fibo_88ca30d1a12845c69ccf62c47a0a1428.png"
+      "description": "Final wide shot at blue hour. The young Asian male violinist (mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf) stands on a bridge holding his reddish-brown violin, music echoing as cars below form light trails.",
+      "duration_sec": 2.0,
+      "motion_style": "handheld_drift",
+      "image_path": "/Users/macbook/Desktop/FPTAI/CreativeControlNvidia/generated/fibo_8d9e15a0bb4b4a82b66e0d4d4d7e70ea.png"
     }
   ]
 }

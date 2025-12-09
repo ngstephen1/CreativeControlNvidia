@@ -2,6 +2,7 @@ from typing import Any, Dict, List, Optional
 import os
 from pathlib import Path
 import logging
+import json
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
@@ -15,7 +16,7 @@ from agents.reviewer_agent import ReviewerAgent
 
 import fibo.fibo_builder as fibo_builder
 from fibo.image_generator_bria import FIBOBriaImageGenerator
-
+from PIL import Image, ImageFilter, ImageEnhance
 # Local SVD renderer (optional; used by /render-mv)
 from video.svd_renderer import render_mv_from_plan
 
@@ -45,6 +46,10 @@ if not BRIA_API_KEY:
         "BRIA_API_TOKEN / BRIA_API_KEY is not set. "
         "Please add it to your .env file or environment."
     )
+
+# If set to 1, true, or True, this forces the /tools/bria/upscale endpoint
+# to use the local PIL-based stub instead of Bria's cloud API.
+BRIA_USE_LOCAL_UPSCALE = os.getenv("BRIA_USE_LOCAL_UPSCALE", "0").strip() in {"1", "true", "True"}
 
 # -------------------------------------------------------------------------
 # FastAPI app + agent singletons
@@ -79,7 +84,7 @@ fibo_image_generator = FIBOBriaImageGenerator(
 )
 
 # -------------------------------------------------------------------------
-# Helper: unified FIBO JSON builder (supports new sh_to_fibo_json name)
+# Helper: unified FIBO JSON builder (supports sh_to_fibo_json alias)
 # -------------------------------------------------------------------------
 
 
@@ -181,6 +186,137 @@ class ImageToolResponse(BaseModel):
     tool: str
     input_path: str
     output_path: str
+
+
+# -------------------------------------------------------------------------
+# Local "Bria Upscaler" stub (PIL-based resize, separate endpoint)
+# -------------------------------------------------------------------------
+
+
+class BriaUpscaleRequest(BaseModel):
+    image_path: str
+    scale: int = 2  # 2x, 4x, etc.
+
+
+class BriaUpscaleResponse(BaseModel):
+    status: str
+    message: str
+    input_path: str
+    output_path: str
+    scale: int
+    width: int
+    height: int
+
+
+def _local_upscale(image_path: str, scale: int) -> Path:
+    """
+    Enhanced CPU-only upscaler using PIL, with fake AI enhancement.
+
+    - Accepts absolute or relative image_path.
+    - Resolves relative paths against ROOT.
+    - Validates scale > 1 and file existence.
+    - Opens image, converts to RGB, resizes by 'scale' using LANCZOS.
+    - Applies fake AI enhancement: DETAIL, SHARPEN, Contrast, Color.
+    - Saves to generated/upscaled/upscaled_x{scale}_<filename>.
+    - Returns output Path.
+    """
+    if scale <= 1:
+        raise ValueError("scale must be > 1")
+
+    # Accept absolute or relative path
+    src = Path(image_path)
+    if not src.is_absolute():
+        src = ROOT / src
+    src = src.resolve()
+    if not src.exists():
+        raise FileNotFoundError(f"Input image not found: {src}")
+
+    dst = GENERATED_DIR / "upscaled" / f"upscaled_x{scale}_{src.name}"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    with Image.open(src) as im:
+        im = im.convert("RGB")
+        w, h = im.size
+        new_size = (w * scale, h * scale)
+        im = im.resize(new_size, Image.LANCZOS)
+        # Fake "AI" enhancement: sharpen, detail, contrast, color
+        im = im.filter(ImageFilter.DETAIL)
+        im = im.filter(ImageFilter.SHARPEN)
+        im = ImageEnhance.Contrast(im).enhance(1.15)
+        im = ImageEnhance.Color(im).enhance(1.1)
+        im.save(dst)
+
+    return dst
+
+
+@app.post("/tools/bria/upscale-local", response_model=BriaUpscaleResponse)
+def bria_upscale_local(req: BriaUpscaleRequest) -> BriaUpscaleResponse:
+    """
+    Temporary local 'upscale' that doesn't call Bria's cloud API.
+
+    This avoids DNS / network errors and API costs.
+    Use `/tools/bria/upscale` for the real HTTP-based Bria Upscale tool.
+    """
+    try:
+        out_path = _local_upscale(req.image_path, req.scale)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # pragma: no cover - defensive
+        logger.exception("Error in local upscaler: %s", e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Local upscaler failed: {e}",
+        )
+
+    with Image.open(out_path) as im:
+        w, h = im.size
+
+    return BriaUpscaleResponse(
+        status="ok",
+        message="Locally upscaled image (PIL stub). Replace with real Bria API when ready.",
+        input_path=req.image_path,
+        output_path=str(out_path.relative_to(ROOT)),
+        scale=req.scale,
+        width=w,
+        height=h,
+    )
+
+
+# -------------------------------------------------------------------------
+# ComfyUI export models
+# -------------------------------------------------------------------------
+
+
+class ComfyUIExportRequest(BaseModel):
+    """
+    Request to build a ComfyUI graph template from storyboard shots
+    and (optionally) precomputed FIBO payloads.
+
+    Typical caller (Streamlit UI) already has both shots + fibo_payloads, but
+    if fibo_payloads is omitted we recompute FIBO JSON using shot_to_fibo_struct.
+    """
+
+    shots: List[Dict[str, Any]]
+    fibo_payloads: Optional[List[Dict[str, Any]]] = None
+
+
+class ComfyUIExportResponse(BaseModel):
+    """
+    Response wrapper around the ComfyUI graph JSON.
+
+    - graph: the full ComfyUI-style node graph (ready to save as JSON).
+    - num_shots: number of shots encoded into the graph.
+    - template_type/version: convenience mirror of graph-level metadata.
+    """
+
+    status: str
+    message: str
+    graph: Dict[str, Any]
+    num_shots: int
+    template_type: Optional[str] = None
+    version: Optional[str] = None
 
 
 # -------------------------------------------------------------------------
@@ -491,6 +627,74 @@ def render_mv_from_plan_endpoint(
 
 
 # -------------------------------------------------------------------------
+# ComfyUI export endpoint
+# -------------------------------------------------------------------------
+
+
+@app.post("/tools/bria/export-comfyui", response_model=ComfyUIExportResponse)
+def export_comfyui(req: ComfyUIExportRequest) -> ComfyUIExportResponse:
+    """
+    Build a ComfyUI graph template from storyboard shots + FIBO JSON.
+
+    Typical usage from the Storyboard UI:
+      - Pass the current `shots` array and the `fibo_payloads` array
+        returned by /full-pipeline-fibo-json or /full-pipeline-generate-images.
+      - If fibo_payloads is omitted, we rebuild FIBO JSON from shots.
+
+    The result is:
+      - `graph`: a ComfyUI-style node graph dictionary
+      - also persisted to generated/comfyui/comfyui_graph.json
+    """
+    shots = req.shots or []
+    if not shots:
+        raise HTTPException(status_code=400, detail="shots list is empty")
+
+    if req.fibo_payloads:
+        fibo_payloads = req.fibo_payloads
+    else:
+        fibo_payloads = []
+        for shot in shots:
+            fibo_json = shot_to_fibo_struct(shot)
+            fibo_payloads.append(
+                {
+                    "shot_id": shot.get("shot_id", "UNKNOWN"),
+                    "scene_id": shot.get("scene", 1),
+                    "fibo_json": fibo_json,
+                }
+            )
+
+    try:
+        graph = fibo_builder.build_comfyui_template(shots, fibo_payloads)
+    except Exception as e:
+        logger.exception("Error building ComfyUI template: %s", e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to build ComfyUI template: {e}",
+        )
+
+    # Persist to disk so the user can easily download/import in ComfyUI
+    out_dir = GENERATED_DIR / "comfyui"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "comfyui_graph.json"
+    try:
+        out_path.write_text(json.dumps(graph, indent=2), encoding="utf-8")
+    except Exception as e:  # non-fatal
+        logger.exception("Failed to write ComfyUI graph to disk: %s", e)
+
+    template_type = graph.get("template_type") if isinstance(graph, dict) else None
+    version = graph.get("version") if isinstance(graph, dict) else None
+
+    return ComfyUIExportResponse(
+        status="ok",
+        message="ComfyUI graph template built successfully.",
+        graph=graph,
+        num_shots=len(shots),
+        template_type=template_type,
+        version=version,
+    )
+
+
+# -------------------------------------------------------------------------
 # Bria HTTP tools: Upscale + RMBG (no local GPU)
 # -------------------------------------------------------------------------
 
@@ -500,18 +704,7 @@ def bria_upscale(req: ImagePathRequest) -> ImageToolResponse:
     """
     Upscale an existing image on disk using Bria's Upscale API.
 
-    Request:
-        {
-          "image_path": "generated/storyboard/shot_001.png",
-          "scale": 2
-        }
-
-    Response:
-        {
-          "tool": "upscale",
-          "input_path": "...",
-          "output_path": "generated/upscaled/shot_001_x2.png"
-        }
+    If BRIA_USE_LOCAL_UPSCALE is set, uses the local PIL-based stub instead.
     """
     # Resolve to absolute path (allow both relative and absolute)
     if os.path.isabs(req.image_path):
@@ -524,35 +717,65 @@ def bria_upscale(req: ImagePathRequest) -> ImageToolResponse:
 
     scale = req.scale or 2
 
-    try:
-        out_bytes = upscale_image_file(src_path, scale=scale)
-    except BriaConfigError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    except Exception as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Bria Upscale API failed: {e}",
+    if BRIA_USE_LOCAL_UPSCALE:
+        # Use the local PIL-based stub
+        try:
+            out_path = _local_upscale(str(src_path), scale)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Local upscaler failed: {e}")
+        try:
+            rel_in = str(src_path.relative_to(ROOT))
+        except ValueError:
+            rel_in = str(src_path)
+        try:
+            rel_out = str(out_path.relative_to(ROOT))
+        except ValueError:
+            rel_out = str(out_path)
+        return ImageToolResponse(
+            tool="upscale_local",
+            input_path=rel_in,
+            output_path=rel_out,
         )
-
-    out_name = f"{src_path.stem}_x{scale}.png"
-    out_path = UPSCALED_DIR / out_name
-    out_path.write_bytes(out_bytes)
-
-    try:
-        rel_in = str(src_path.relative_to(ROOT))
-    except ValueError:
-        rel_in = str(src_path)
-
-    try:
-        rel_out = str(out_path.relative_to(ROOT))
-    except ValueError:
-        rel_out = str(out_path)
-
-    return ImageToolResponse(
-        tool="upscale",
-        input_path=rel_in,
-        output_path=rel_out,
-    )
+    else:
+        # Use Bria's real HTTP API, but fallback to local if any error occurs
+        try:
+            out_bytes = upscale_image_file(src_path, scale=scale)
+        except Exception as e:
+            logger.warning("Bria upscale failed, falling back to local: %s", e)
+            try:
+                out_path = _local_upscale(str(src_path), scale)
+            except Exception as le:
+                raise HTTPException(status_code=500, detail=f"Local upscaler failed: {le}")
+            try:
+                rel_in = str(src_path.relative_to(ROOT))
+            except ValueError:
+                rel_in = str(src_path)
+            try:
+                rel_out = str(out_path.relative_to(ROOT))
+            except ValueError:
+                rel_out = str(out_path)
+            return ImageToolResponse(
+                tool="upscale_local",
+                input_path=rel_in,
+                output_path=rel_out,
+            )
+        # If Bria API succeeded
+        out_name = f"{src_path.stem}_x{scale}.png"
+        out_path = UPSCALED_DIR / out_name
+        out_path.write_bytes(out_bytes)
+        try:
+            rel_in = str(src_path.relative_to(ROOT))
+        except ValueError:
+            rel_in = str(src_path)
+        try:
+            rel_out = str(out_path.relative_to(ROOT))
+        except ValueError:
+            rel_out = str(out_path)
+        return ImageToolResponse(
+            tool="upscale",
+            input_path=rel_in,
+            output_path=rel_out,
+        )
 
 
 @app.post("/tools/bria/rmbg", response_model=ImageToolResponse)

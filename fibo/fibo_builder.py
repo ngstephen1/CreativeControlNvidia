@@ -1,36 +1,45 @@
-# fibo/fibo_builder.py
+"""fibo/fibo_builder.py
 
-"""
 Utilities to convert internal shot dictionaries into FIBO-compatible
-StructuredPrompt JSON objects.
+StructuredPrompt JSON objects and to derive secondary representations like
+DSL summaries and ComfyUI export templates.
 
-This module is intentionally:
+Design principles
+-----------------
 - Pure / side-effect free
 - Independent of BRIA API client code
+- Focused on shaping Python dicts (no network / disk I/O)
 
-It focuses on building a *base* FIBO JSON from:
-  - shot["description"]
-  - shot["environment"]
-  - shot["camera"]
-  - shot["lighting"]
+The main responsibilities here are:
+  1. Build a *base* FIBO JSON from an internal `shot` dict via
+     `shot_to_fibo_json(shot)`.
+  2. Provide a compact, human-readable DSL summary string for continuity
+     and debugging via `shot_to_dsl_summary(...)`.
+  3. Build a ComfyUI-ready JSON *template* that encodes each FIBO JSON as
+     a node input via `build_comfyui_template(...)`.
 
 Higher-level controls such as:
   - HDR / 16-bit toggle
   - Camera lens / shutter presets
   - Lighting blueprint presets
   - Film stock color palettes
+  - Composition / pose / material presets
 
 are applied later in `fibo/image_generator_bria.py`, which:
   - calls `shot_to_fibo_json(shot)` to get the base JSON
-  - then layers the four control dimensions on top.
+  - then layers the control dimensions on top.
 """
 
 from typing import Any, Dict, List
 
 
+# ---------------------------------------------------------------------------
+# Low-level FIBO JSON builders
+# ---------------------------------------------------------------------------
+
+
 def _build_background_setting(environment: Dict[str, Any]) -> str:
-    """
-    Build a simple background_setting string from environment fields.
+    """Build a simple background_setting string from environment fields.
 
     Example:
       {"setting": "city", "time_of_day": "night", "weather": "rain"}
@@ -52,8 +61,8 @@ def _build_background_setting(environment: Dict[str, Any]) -> str:
 
 
 def _build_lighting_block(shot: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Convert the internal lighting representation into a FIBO-style lighting dict.
+    """Convert the internal lighting representation into a FIBO-style
+    lighting dict.
 
     We intentionally keep this generic and cinematic-friendly; more specific
     lighting blueprints (e.g., "noir rim light", "soft key through window")
@@ -103,8 +112,7 @@ def _build_lighting_block(shot: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _build_aesthetics_block(shot: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Build aesthetics (composition, color scheme, mood) from camera intent
+    """Build aesthetics (composition, color scheme, mood) from camera intent
     and environment.
 
     NOTE: film stock palettes are applied later in image_generator_bria via
@@ -158,8 +166,7 @@ def _build_aesthetics_block(shot: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _build_photographic_characteristics(shot: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Build the photographic_characteristics block from the camera dict.
+    """Build the photographic_characteristics block from the camera dict.
 
     Camera-level stylistic overrides (HDR, film stock, etc.) are layered later,
     but we encode a sensible base representation here.
@@ -173,7 +180,10 @@ def _build_photographic_characteristics(shot: Dict[str, Any]) -> Dict[str, Any]:
         aperture = 2.8
 
     if aperture <= 2.0:
-        dof = "shallow depth of field, subject in focus with softly blurred background"
+        dof = (
+            "shallow depth of field, subject in focus with softly blurred "
+            "background"
+        )
     elif aperture >= 8.0:
         dof = "deep depth of field, most of the scene in focus"
     else:
@@ -204,9 +214,8 @@ def _build_photographic_characteristics(shot: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _build_objects(shot: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Build a minimal objects list for the FIBO JSON; for now we treat the whole
-    description as a single primary subject in the center of frame.
+    """Build a minimal objects list for the FIBO JSON; for now we treat the
+    whole description as a single primary subject in the center of frame.
 
     Later, more advanced object breakdowns (characters, props, set dressing)
     can be added by higher-level agents.
@@ -237,8 +246,8 @@ def _build_objects(shot: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def shot_to_fibo_json(shot: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Convert an internal shot dict into a FIBO-compatible StructuredPrompt JSON.
+    """Convert an internal shot dict into a FIBO-compatible StructuredPrompt
+    JSON.
 
     This is the main bridge between:
       - CreativeDirector / Cinematography / Continuity agents
@@ -273,7 +282,7 @@ def shot_to_fibo_json(shot: Dict[str, Any]) -> Dict[str, Any]:
         "style_medium": "photograph, cinematic storyboard frame",
         "text_render": [],
         "context": (
-            f"Storyboard frame generated by Autonomous Studio Director "
+            "Storyboard frame generated by Autonomous Studio Director "
             f"for scene {scene_id}, shot {shot_id}."
         ),
         "artistic_style": "cinematic realistic, detailed, filmic look",
@@ -305,3 +314,199 @@ def shot_to_fibo_json(shot: Dict[str, Any]) -> Dict[str, Any]:
     }
 
     return fibo_json
+
+
+# ---------------------------------------------------------------------------
+# Secondary representations: DSL summary & ComfyUI template
+# ---------------------------------------------------------------------------
+
+
+def _safe_get_mv_field(
+    shot: Dict[str, Any] | None,
+    fibo_json: Dict[str, Any] | None,
+    key: str,
+    default: Any | None = None,
+) -> Any | None:
+    """Helper to pull a field from mv_metadata first, then from the raw shot.
+
+    This lets downstream code remain agnostic about whether it is working
+    directly from FIBO JSON or from the original shot dict.
+    """
+    if fibo_json is not None:
+        mv_meta = fibo_json.get("mv_metadata") or {}
+        if key in mv_meta and mv_meta[key] is not None:
+            return mv_meta[key]
+
+    if shot is not None and key in shot and shot[key] is not None:
+        return shot[key]
+
+    return default
+
+
+def shot_to_dsl_summary(shot: Dict[str, Any], fibo_json: Dict[str, Any] | None = None) -> str:
+    """Build a compact, human-readable DSL-style summary for a shot.
+
+    This is used by the Continuity Inspector and any UI elements that need
+    a single-line description of the shot's technical look, e.g.:
+
+      "S1–SHOT3 | CAM: low-angle, 35mm | LIGHT: warm café window light |\n"
+      "LOOK: teal-orange / melancholic, introspective atmosphere | HDR"
+
+    The function is resilient to missing keys and will gracefully fall back
+    to defaults where necessary.
+    """
+    fibo_json = fibo_json or {}
+
+    mv_meta = fibo_json.get("mv_metadata") or {}
+    aesthetics = fibo_json.get("aesthetics") or {}
+    lighting = fibo_json.get("lighting") or {}
+    photo = fibo_json.get("photographic_characteristics") or {}
+
+    scene = _safe_get_mv_field(shot, fibo_json, "scene")
+    shot_id = _safe_get_mv_field(shot, fibo_json, "shot_id")
+
+    # Camera
+    camera_angle = photo.get("camera_angle") or _safe_get_mv_field(
+        shot, fibo_json, "camera_angle", "eye-level"
+    )
+    lens_focal_length = photo.get("lens_focal_length") or _safe_get_mv_field(
+        shot, fibo_json, "lens_focal_length", "50mm"
+    )
+
+    # Lighting / palette
+    lighting_preset = mv_meta.get("lighting_preset")
+    film_palette = mv_meta.get("film_palette")
+    hdr_flag = bool(mv_meta.get("hdr_16bit", False))
+
+    color_scheme = aesthetics.get("color_scheme")
+    mood = aesthetics.get("mood_atmosphere") or mv_meta.get("mood_preset")
+
+    # Build the pieces
+    parts: List[str] = []
+
+    if scene is not None and shot_id is not None:
+        parts.append(f"S{scene}–{shot_id}")
+
+    cam_desc = f"{camera_angle}, {lens_focal_length}".strip(", ")
+    if cam_desc:
+        parts.append(f"CAM: {cam_desc}")
+
+    light_desc = lighting_preset or lighting.get("conditions")
+    if light_desc:
+        parts.append(f"LIGHT: {light_desc}")
+
+    look_bits: List[str] = []
+    if film_palette:
+        look_bits.append(str(film_palette))
+    if color_scheme:
+        look_bits.append(str(color_scheme))
+    if mood:
+        look_bits.append(str(mood))
+    if look_bits:
+        parts.append("LOOK: " + " / ".join(look_bits))
+
+    parts.append("HDR" if hdr_flag else "SDR")
+
+    return " | ".join(parts)
+
+
+def build_comfyui_template(
+    shots: List[Dict[str, Any]],
+    fibo_payloads: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Build a *ComfyUI-style* graph template for a sequence of shots.
+
+    This does **not** try to mirror the exact internal node schema of
+    ComfyUI-BRIA. Instead, it provides a stable, declarative JSON that a
+    ComfyUI workflow (or custom node) can ingest and map into the actual
+    graph.
+
+    The shape is intentionally simple:
+
+    {
+      "template_type": "comfyui-graph",
+      "version": "0.1.0",
+      "description": "Autogenerated BRIA FIBO graph for music-video storyboard shots.",
+      "nodes": {
+        "shot_00": {
+          "class_type": "BRIA_FIBO_Generate",
+          "inputs": {
+            "json_prompt": { ... full FIBO JSON ... },
+            "seed": 123,
+            "cfg_scale": 5.0,
+            "steps": 25,
+            "width": 1024,
+            "height": 1024
+          },
+          "_meta": {
+            "scene": 1,
+            "shot_id": "SHOT1",
+            "dsl_summary": "S1–SHOT1 | CAM: ...",
+          }
+        },
+        ...
+      },
+      "meta": {
+        "num_shots": 7
+      }
+    }
+
+    A downstream ComfyUI loader can:
+      - Iterate over `nodes` in order.
+      - For each node, read `inputs["json_prompt"]` and wire it into an
+        actual BRIA-FIBO generation node.
+      - Use `_meta` to display friendly labels in the UI.
+    """
+    if len(shots) != len(fibo_payloads):
+        raise ValueError(
+            "build_comfyui_template: shots and fibo_payloads must be same length"
+        )
+
+    nodes: Dict[str, Any] = {}
+
+    for idx, (shot, fibo_json) in enumerate(zip(shots, fibo_payloads)):
+        node_id = f"shot_{idx:02d}"
+
+        mv_meta = fibo_json.get("mv_metadata") or {}
+
+        # Basic tech params with gentle defaults
+        width = int(shot.get("width") or mv_meta.get("width") or 1024)
+        height = int(shot.get("height") or mv_meta.get("height") or 1024)
+        steps = int(shot.get("steps") or mv_meta.get("steps") or 25)
+        cfg_scale = float(shot.get("cfg_scale") or mv_meta.get("cfg_scale") or 5.0)
+        seed_raw = shot.get("seed") or mv_meta.get("seed") or idx
+        try:
+            seed = int(seed_raw)
+        except (TypeError, ValueError):
+            seed = idx
+
+        node: Dict[str, Any] = {
+            "class_type": "BRIA_FIBO_Generate",
+            "inputs": {
+                "json_prompt": fibo_json,
+                "seed": seed,
+                "cfg_scale": cfg_scale,
+                "steps": steps,
+                "width": width,
+                "height": height,
+            },
+            "_meta": {
+                "scene": mv_meta.get("scene"),
+                "shot_id": mv_meta.get("shot_id"),
+                "dsl_summary": shot_to_dsl_summary(shot, fibo_json),
+            },
+        }
+
+        nodes[node_id] = node
+
+    template: Dict[str, Any] = {
+        "template_type": "comfyui-graph",
+        "version": "0.1.0",
+        "description": "Autogenerated BRIA FIBO graph for music-video storyboard shots.",
+        "nodes": nodes,
+        "meta": {
+            "num_shots": len(shots),
+        },
+    }
+
+    return template

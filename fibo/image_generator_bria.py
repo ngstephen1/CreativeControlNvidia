@@ -6,7 +6,12 @@ import uuid
 import json
 from typing import Any, Dict, Optional, Mapping
 
+from pathlib import Path
+from PIL import Image, ImageDraw
 import requests
+
+# If set, disables Bria API calls and returns a local stub image instead.
+BRIA_OFFLINE_MODE = os.getenv("BRIA_OFFLINE_MODE", "0") == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +219,7 @@ MOOD_PRESETS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+
 # ---------------------------------------------------------------------------
 # NEW: Material / texture presets – surfaces & microtexture
 # ---------------------------------------------------------------------------
@@ -240,6 +246,27 @@ MATERIAL_PRESETS: Dict[str, Dict[str, Any]] = {
         "microtexture_behavior": "low-grain, crisp edges, minimal clutter",
     },
 }
+
+
+def _create_placeholder_image(
+    output_dir: str,
+    width: int,
+    height: int,
+    label: str = "Bria offline / fallback",
+) -> str:
+    """Create a simple placeholder image when Bria is unavailable or when
+    BRIA_OFFLINE_MODE is enabled. This keeps the storyboard pipeline
+    running so downstream steps can still be tested.
+    """
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    img = Image.new("RGB", (max(width, 64), max(height, 64)), (18, 18, 18))
+    draw = ImageDraw.Draw(img)
+    text = label[:96]  # keep short to avoid wrapping issues
+    draw.text((16, 16), text, fill=(230, 230, 230))
+    filename = f"bria_offline_{uuid.uuid4().hex}.png"
+    out_path = str(Path(output_dir) / filename)
+    img.save(out_path)
+    return out_path
 
 
 class FIBOBriaImageGenerator:
@@ -854,34 +881,74 @@ class FIBOBriaImageGenerator:
             "api_token": self.api_key,
         }
 
-        # 1) Call Bria image generation API
-        resp = requests.post(
-            self.base_url,
-            json=payload,
-            headers=headers,
-            timeout=60,
-        )
-
-        if resp.status_code != 200:
-            raise RuntimeError(
-                f"Bria API error {resp.status_code}: {resp.text}"
+        # 1) If offline mode is enabled, skip the HTTP call and emit a stub image.
+        if BRIA_OFFLINE_MODE:
+            return _create_placeholder_image(
+                self.output_dir,
+                effective_width,
+                effective_height,
+                label="BRIA_OFFLINE_MODE=1 (local stub)",
             )
 
-        data = resp.json()
+        # 2) Call Bria image generation API with basic error handling
+        try:
+            resp = requests.post(
+                self.base_url,
+                json=payload,
+                headers=headers,
+                timeout=60,
+            )
+        except requests.RequestException as exc:
+            # Network / timeout error – fallback to placeholder so the app keeps running
+            return _create_placeholder_image(
+                self.output_dir,
+                effective_width,
+                effective_height,
+                label=f"Bria request error: {exc.__class__.__name__}",
+            )
+
+        if resp.status_code != 200:
+            # For 5xx / gateway errors, we also fallback to a placeholder image.
+            if resp.status_code >= 500:
+                return _create_placeholder_image(
+                    self.output_dir,
+                    effective_width,
+                    effective_height,
+                    label=f"Bria API {resp.status_code} (fallback)",
+                )
+            # For 4xx errors, fail loudly so misconfiguration is visible.
+            snippet = resp.text[:400]
+            raise RuntimeError(f"Bria API error {resp.status_code}: {snippet}")
+
+        try:
+            data = resp.json()
+        except ValueError:
+            raise RuntimeError(f"Invalid JSON in Bria response: {resp.text[:400]}")
+
         result = data.get("result", data)
         image_url = result.get("image_url")
 
         if not image_url:
-            raise RuntimeError(
-                f"No image_url found in Bria response: {data}"
+            raise RuntimeError(f"No image_url found in Bria response: {data}")
+
+        # 3) Download the image to local disk
+        try:
+            img_resp = requests.get(image_url, timeout=60)
+        except requests.RequestException as exc:
+            return _create_placeholder_image(
+                self.output_dir,
+                effective_width,
+                effective_height,
+                label=f"Download error: {exc.__class__.__name__}",
             )
 
-        # 2) Download the image to local disk
-        img_resp = requests.get(image_url, timeout=60)
         if img_resp.status_code != 200:
-            raise RuntimeError(
-                f"Failed to download image from {image_url}: "
-                f"{img_resp.status_code} {img_resp.text}"
+            # Non‑200 from CDN – produce a stub so the storyboard run can continue.
+            return _create_placeholder_image(
+                self.output_dir,
+                effective_width,
+                effective_height,
+                label=f"CDN error {img_resp.status_code}",
             )
 
         ext = "png" if effective_format.lower().startswith("png") else "jpg"
