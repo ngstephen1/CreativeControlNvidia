@@ -3,8 +3,10 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
-import fal_client
+from urllib.parse import urlparse
+import moviepy
+import requests
+import fal_client   
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -25,6 +27,10 @@ DEFAULT_FPS: int = 15
 
 # Max parallel LongCat jobs at once
 MAX_PARALLEL_JOBS: int = 3
+
+# Directory where we store downloaded clips and combined MV files
+MV_OUTPUT_DIR = Path(os.getenv("MV_OUTPUT_DIR", "generated/mv_outputs"))
+MV_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # -------------------------------------------------
@@ -131,15 +137,23 @@ def _render_single_shot_with_longcat(
     fps = DEFAULT_FPS
     num_frames = _duration_to_frames(effective_duration, fps=fps)
 
+    # Safe “requested” string for logging (no float() crashes)
+    if isinstance(raw_duration, (int, float)):
+        requested_str = f"{float(raw_duration):.2f}"
+    elif raw_duration is None:
+        requested_str = f"{MAX_DURATION_SEC_PER_SHOT:.2f}"
+    else:
+        requested_str = str(raw_duration)
+
     logger.info(
         "[LongCat][%d/%d] Scene %s, shot %s: uploading frame '%s' "
-        "(requested=%.2fs, effective=%.2fs → %d frames @ %dfps)",
+        "(requested=%ss, effective=%.2fs → %d frames @ %dfps)",
         idx,
         total,
         scene_id,
         shot_id,
         local_path,
-        float(raw_duration) if raw_duration is not None else MAX_DURATION_SEC_PER_SHOT,
+        requested_str,
         effective_duration,
         num_frames,
         fps,
@@ -251,7 +265,89 @@ def _render_single_shot_with_longcat(
         "duration_sec": effective_duration,
         "fps": fps,
         "num_frames": num_frames,
+        "sequence_index": idx,
     }
+
+
+def _download_clip_to_disk(video_url: str, index: int) -> Optional[Path]:
+    """Download a remote video URL to MV_OUTPUT_DIR and return the local path.
+
+    If anything fails, logs a warning and returns None.
+    """
+    try:
+        parsed = urlparse(video_url)
+        # Try to keep a meaningful file name extension when present
+        ext = ".mp4"
+        if parsed.path:
+            _, _, maybe_name = parsed.path.rpartition("/")
+            if "." in maybe_name:
+                ext = "." + maybe_name.split(".")[-1]
+        local_name = f"clip_{index:03d}{ext}"
+        local_path = MV_OUTPUT_DIR / local_name
+
+        resp = requests.get(video_url, stream=True, timeout=60)
+        resp.raise_for_status()
+        with local_path.open("wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+        return local_path
+    except Exception as e:  # pragma: no cover - best-effort utility
+        logger.warning("Failed to download clip %s: %s", video_url, e)
+        return None
+
+
+def _concatenate_clips_locally(clips: List[Dict[str, Any]]) -> Optional[Path]:
+    """Concatenate all clip video URLs into a single local MP4.
+
+    This uses moviepy on CPU. If moviepy is not installed or
+    concatenation fails, returns None and logs a warning.
+    """
+    if not clips:
+        return None
+
+    try:
+        from moviepy.editor import VideoFileClip, concatenate_videoclips
+    except Exception as e:  # pragma: no cover - optional dependency
+        logger.warning("moviepy not available, skipping concatenation: %s", e)
+        return None
+
+    # Ensure deterministic order based on sequence_index
+    ordered = sorted(clips, key=lambda c: c.get("sequence_index", 9999))
+
+    local_paths: List[Path] = []
+    for i, clip in enumerate(ordered):
+        url = clip.get("video_url")
+        if not url:
+            continue
+        path = _download_clip_to_disk(url, i + 1)
+        if path is not None:
+            local_paths.append(path)
+
+    if not local_paths:
+        logger.warning("No local video files were downloaded; cannot concatenate.")
+        return None
+
+    video_clips = []
+    try:
+        for p in local_paths:
+            video_clips.append(VideoFileClip(str(p)))
+        final = concatenate_videoclips(video_clips, method="compose")
+        output_path = MV_OUTPUT_DIR / "combined_music_video.mp4"
+        # Use a sane codec; adjust if needed for your environment
+        final.write_videofile(str(output_path), codec="libx264", audio_codec="aac")
+        for vc in video_clips:
+            vc.close()
+        return output_path
+    except Exception as e:  # pragma: no cover - best-effort utility
+        logger.warning("Failed to concatenate clips: %s", e)
+        return None
+    finally:
+        for vc in video_clips:
+            try:
+                vc.close()
+            except Exception:
+                pass
 
 
 # -------------------------------------------------
@@ -271,6 +367,7 @@ def render_music_video(
       1. Upload the generated frame (PNG) to fal storage.
       2. Call LongCat image→video with the shot description as prompt.
       3. Collect the returned video URL.
+      4. Attempt to concatenate all clips into a single local MP4.
 
     ✅ New:
       * Calls are executed in PARALLEL using ThreadPoolExecutor,
@@ -299,12 +396,11 @@ def render_music_video(
             ]
         }
 
-    This function **does not concatenate** clips into a single MP4.
-    Instead, it returns one LongCat video per shot:
+    Returns:
 
         {
             "backend": "fal-ai/longcat-video/image-to-video/480p",
-            "mv_url": "<url-of-first-clip-or-empty-string>",
+            "mv_url": "<combined-local-mp4-or-first-clip-url>",
             "clips": [
                 {
                     "scene": 1,
@@ -318,16 +414,19 @@ def render_music_video(
                 },
                 ...
             ],
-            "num_clips": <int>
+            "num_clips": <int>,
+            "project_type": "...",
+            "created_at": "..."
         }
 
     Notes:
-      * Every shot is clamped to about **2 seconds** to save credits.
+      * Every shot is clamped to about **2 seconds** to save credits
         (see MAX_DURATION_SEC_PER_SHOT).
       * We explicitly pass `num_frames` and `fps` into LongCat so we
         don't get the long (~11s) default clips.
       * LongCat calls are parallelized (up to MAX_PARALLEL_JOBS).
-      * If all shots fail, `clips` will be [] and `mv_url` == "".
+      * We attempt to concatenate all clips into one MP4 using moviepy;
+        if that fails, we fall back to the first clip URL.
     """
     _ensure_fal_key()
 
@@ -339,6 +438,8 @@ def render_music_video(
             "mv_url": "",
             "clips": [],
             "num_clips": 0,
+            "project_type": plan.get("project_type"),
+            "created_at": plan.get("created_at"),
         }
 
     total = len(shots)
@@ -391,8 +492,21 @@ def render_music_video(
                 except Exception as cb_err:
                     logger.warning("progress_cb raised an exception: %s", cb_err)
 
-    # For now, choose the first successful clip as "mv_url" representative
-    mv_url = clips[0]["video_url"] if clips else ""
+    # Sort clips by original sequence index for a stable timeline
+    clips = sorted(clips, key=lambda c: c.get("sequence_index", 9999))
+
+    # Try to concatenate all clips into a single local MP4
+    combined_path = _concatenate_clips_locally(clips)
+    if combined_path is not None:
+        mv_url = combined_path.as_posix()
+        logger.info(
+            "Combined music video created at %s (from %d clip[s])",
+            mv_url,
+            len(clips),
+        )
+    else:
+        # Fallback: use the first individual clip URL if available
+        mv_url = clips[0]["video_url"] if clips else ""
 
     result_payload: Dict[str, Any] = {
         "backend": LONGCAT_MODEL_ID,

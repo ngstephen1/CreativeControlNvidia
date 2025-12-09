@@ -13,13 +13,13 @@ from agents.continuity_agent import ContinuityAgent
 from agents.qc_agent import QualityControlAgent
 from agents.reviewer_agent import ReviewerAgent
 
-import fibo.fibo_builder as fibo_builder  # module with shot_to_fibo_json / sh_to_fibo_json
+import fibo.fibo_builder as fibo_builder
 from fibo.image_generator_bria import FIBOBriaImageGenerator
 
 # Local SVD renderer (optional; used by /render-mv)
 from video.svd_renderer import render_mv_from_plan
 
-# External video backend (fal.ai LongCat image→video)
+# External video backend (fal.ai LongCat image→video) used by /render-mv-json
 from video.video_backend import render_music_video
 
 
@@ -56,31 +56,49 @@ ROOT = Path(__file__).resolve().parents[1]
 GENERATED_DIR = ROOT / "generated"
 GENERATED_DIR.mkdir(exist_ok=True, parents=True)
 
-# FIBO → Bria image generator (HDR/controllability is handled in the generator
-# and in fibo_builder via the FIBO JSON; api.py stays simple)
+# FIBO → Bria image generator
+# All advanced controllability (HDR / 16-bit intent, camera geometry,
+# lighting blueprints, film stock palettes, composition presets, pose
+# blueprints, mood/material/continuity hints, etc.) is encoded inside
+# the FIBO JSON (fibo_builder) and interpreted here.
 fibo_image_generator = FIBOBriaImageGenerator(
     api_key=BRIA_API_KEY,
     output_dir=str(GENERATED_DIR),
 )
 
-
 # -------------------------------------------------------------------------
 # Helper: unified FIBO JSON builder (supports new sh_to_fibo_json name)
 # -------------------------------------------------------------------------
 
+
 def shot_to_fibo_struct(shot: Dict[str, Any]) -> Dict[str, Any]:
     """Return a FIBO StructuredPrompt JSON for a single shot.
 
-    We support both the original `shot_to_fibo_json(shot)` API and a newer
-    `sh_to_fibo_json(shot)` variant, so that the Streamlit UI and other
-    consumers can call into `app.api` without worrying about naming.
+    We support both:
+      - fibo_builder.shot_to_fibo_json(shot)
+      - fibo_builder.sh_to_fibo_json(shot)
 
-    All advanced controllability (HDR / 16-bit pipeline, camera geometry,
-    lighting blueprints, film stock palettes, etc.) is encoded inside the
-    returned FIBO JSON by fibo_builder.
+    so the rest of the app (and Streamlit UI) does not care which
+    function name the builder exposes.
+
+    The returned FIBO JSON is expected to already include advanced
+    controllability fields (with defaults if not explicitly set), e.g.:
+
+      - hdr_16bit / hdr_mode
+      - camera_preset / lens_focal_length / depth_of_field hints
+      - lighting_preset / lighting_blueprint
+      - film_palette / film_stock_palette
+      - composition_preset
+      - pose_blueprint
+      - mood_intensity / mood_controls
+      - material_style / material_controls
+      - continuity_group_id
     """
     if hasattr(fibo_builder, "sh_to_fibo_json"):
+        # Newer helper name (shorter) used by some versions
         return fibo_builder.sh_to_fibo_json(shot)  # type: ignore[attr-defined]
+
+    # Backwards compatible name
     return fibo_builder.shot_to_fibo_json(shot)
 
 
@@ -92,9 +110,11 @@ def shot_to_fibo_struct(shot: Dict[str, Any]) -> Dict[str, Any]:
 class ScriptRequest(BaseModel):
     """Basic request for all text→JSON pipelines.
 
-    For now we keep this minimal (script_text only) to stay compatible with
-    the Streamlit UI. More advanced toggles (HDR, film stock, etc.) are
-    injected via the FIBO JSON and Bria generator, not through this schema.
+    For now we keep this minimal (script_text only) to stay compatible
+    with the Streamlit UI. More advanced toggles (HDR, film stock, etc.)
+    are injected via:
+      - the shot dictionaries created/modified in the UI, and
+      - fibo_builder + FIBOBriaImageGenerator.
     """
 
     script_text: str
@@ -141,11 +161,13 @@ class RenderMVFromPlanResponse(BaseModel):
 
 @app.get("/health")
 def health() -> Dict[str, str]:
+    """Simple health check for monitoring / liveness probes."""
+
     return {"status": "ok"}
 
 
 # -------------------------------------------------------------------------
-# Step-by-step endpoints
+# Step-by-step endpoints (script → shots → cinematography)
 # -------------------------------------------------------------------------
 
 
@@ -175,13 +197,14 @@ def script_to_shots_with_cinematography(req: ScriptRequest) -> Dict[str, Any]:
 
 @app.post("/full-pipeline")
 def full_pipeline(req: ScriptRequest) -> Dict[str, Any]:
-    """Full JSON-native, agentic pipeline (no images):
+    """Full JSON-native, agentic pipeline (no images).
 
-    1. CreativeDirectorAgent  -> shot templates
-    2. CinematographyAgent    -> add camera + lighting
-    3. ContinuityAgent        -> enforce character & scene consistency
-    4. QualityControlAgent    -> generate QC report
-    5. ReviewerAgent          -> wrap report into review summary
+    Steps:
+      1. CreativeDirectorAgent  -> shot templates
+      2. CinematographyAgent    -> add camera + lighting
+      3. ContinuityAgent        -> enforce character & scene consistency
+      4. QualityControlAgent    -> generate QC report
+      5. ReviewerAgent          -> wrap report into review summary
     """
 
     # 1) shot breakdown
@@ -264,16 +287,17 @@ def full_pipeline_fibo_json(req: ScriptRequest) -> Dict[str, Any]:
 
 @app.post("/full-pipeline-generate-images")
 def full_pipeline_generate_images(req: ScriptRequest) -> Dict[str, Any]:
-    """Full agent pipeline + FIBO JSON builder + Bria FIBO image generation.
+    """Full agent pipeline + FIBO JSON builder + Bria image generation.
 
-    - runs all agents
-    - builds FIBO JSON for each shot
-    - calls FIBOBriaImageGenerator to create PNGs per shot in `generated/`
+    - Runs all agents
+    - Builds FIBO JSON for each shot
+    - Calls FIBOBriaImageGenerator to create PNGs per shot in `generated/`
 
     Advanced controllability (HDR, camera geometry, lighting blueprints,
-    film stock palettes, etc.) is encoded inside the FIBO JSON by
-    fibo_builder / shot_to_fibo_struct and interpreted inside
-    FIBOBriaImageGenerator. This endpoint just orchestrates.
+    film stock palettes, composition / pose presets, etc.) is encoded
+    inside the FIBO JSON by fibo_builder / shot_to_fibo_struct and then
+    interpreted inside FIBOBriaImageGenerator. This endpoint just
+    orchestrates.
     """
 
     # 1) shot breakdown
@@ -308,10 +332,11 @@ def full_pipeline_generate_images(req: ScriptRequest) -> Dict[str, Any]:
 
         try:
             # FIBOBriaImageGenerator internally reads HDR / controllability
-            # hints from the fibo_json (e.g. hdr_mode, lighting_blueprint,
-            # film_stock_palette, etc.), so we don't need extra args here.
+            # hints from fibo_json (hdr_mode, camera_preset,
+            # lighting_preset, film_palette, composition_preset,
+            # pose_blueprint, etc.).
             img_path = fibo_image_generator.generate_image_from_fibo_json(fibo_json)
-        except Exception as exc:
+        except Exception as exc:  # pragma: no cover - external service failure
             # Bubble up as 502 because it's an upstream service error (Bria API)
             raise HTTPException(
                 status_code=502,
@@ -350,8 +375,7 @@ def render_mv_endpoint(
     req: RenderMVRequest,
     background_tasks: BackgroundTasks,
 ) -> RenderMVResponse:
-    """Trigger music video rendering from mv_video_plan.json using the local
-    Stable Video Diffusion renderer (video/svd_renderer.py).
+    """Trigger music video rendering from mv_video_plan.json using SVD.
 
     This will:
       - Load the plan JSON (script→shots→images→mv_video_plan.json)
@@ -398,19 +422,21 @@ def render_mv_endpoint(
 def render_mv_from_plan_endpoint(
     req: RenderMVFromPlanRequest,
 ) -> RenderMVFromPlanResponse:
-    """Accept an mv_video_plan dict and delegate to the external video backend
-    via video_backend.render_music_video(...).
+    """Delegate an mv_video_plan dict to the external video backend.
 
-    The backend (currently fal.ai LongCat image→video) is expected to return:
+    Currently this uses video_backend.render_music_video(...), which is
+    implemented via fal.ai's LongCat image-to-video endpoint. The backend
+    is expected to return:
+
       - status
       - message
-      - mv_url: final stitched MV URL
-      - clips: per-shot clip metadata (including clip_url / video.url, etc.)
+      - mv_url: final stitched MV URL (if applicable)
+      - clips: per-shot clip metadata (including video.url, etc.)
     """
 
     try:
         result = render_music_video(req.plan)
-    except Exception as e:
+    except Exception as e:  # pragma: no cover - defensive
         # Wrap any unexpected error from the video backend
         raise HTTPException(status_code=500, detail=f"Video backend error: {e}")
 

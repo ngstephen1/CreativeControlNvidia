@@ -1,7 +1,10 @@
+"""This module wraps Bria FIBO image generation and encodes HDR, camera, lighting,
+film stock, composition, pose, mood, material, and continuity controls into the structured_prompt.
+"""
 import os
 import uuid
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Mapping
 
 import requests
 
@@ -94,6 +97,150 @@ FILM_PALETTES: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# NEW: Composition presets – framing & spatial design
+# ---------------------------------------------------------------------------
+
+COMPOSITION_PRESETS: Dict[str, Dict[str, Any]] = {
+    "rule_of_thirds": {
+        "framing_style": "rule of thirds",
+        "subject_placement": "primary subject placed on thirds intersection",
+        "depth_structure": "foreground and background elements supporting depth",
+        "guiding_lines": "subtle leading lines into the subject",
+        "camera_height": "eye-level",
+        "shot_size": "medium shot",
+    },
+    "centered_symmetry": {
+        "framing_style": "centered symmetrical composition",
+        "subject_placement": "subject centered with symmetrical background",
+        "depth_structure": "balanced foreground and background elements",
+        "guiding_lines": "symmetry lines emphasizing stability",
+        "camera_height": "eye-level",
+        "shot_size": "medium to medium-close shot",
+    },
+    "establishing_wide": {
+        "framing_style": "wide establishing shot",
+        "subject_placement": "subject small relative to environment",
+        "depth_structure": "deep depth with clear foreground, midground, background",
+        "guiding_lines": "strong leading lines from architecture and streets",
+        "camera_height": "slightly elevated",
+        "shot_size": "wide or extreme wide shot",
+    },
+    "hero_low_angle": {
+        "framing_style": "dynamic low-angle hero framing",
+        "subject_placement": "subject dominant in frame, closer to camera",
+        "depth_structure": "foreground textures near lens; distant background",
+        "guiding_lines": "upward diagonal lines enhancing power",
+        "camera_height": "low angle looking up",
+        "shot_size": "medium or medium-close shot",
+    },
+    "intimate_closeup": {
+        "framing_style": "tight, intimate framing",
+        "subject_placement": "face filling much of the frame",
+        "depth_structure": "very shallow depth of field, blurred background",
+        "guiding_lines": "minimal lines, focus on eyes and expression",
+        "camera_height": "eye-level or slightly above",
+        "shot_size": "close-up or extreme close-up",
+    },
+}
+
+# ---------------------------------------------------------------------------
+# NEW: Pose blueprints – character acting & stance
+# ---------------------------------------------------------------------------
+
+POSE_BLUEPRINTS: Dict[str, Dict[str, Any]] = {
+    "performance_violinist": {
+        "body_orientation": "3/4 towards camera, upper body engaged",
+        "gesture": "playing violin with expressive arm movement",
+        "emotion": "focused, passionate, immersed in music",
+        "head_angle": "slightly down or tilted into instrument",
+        "eye_focus": "eyes partially closed or looking at the violin",
+        "stance": "standing, weight balanced on both feet",
+        "movement": "subtle body sway following rhythm",
+    },
+    "reflective_window_gaze": {
+        "body_orientation": "side profile near window",
+        "gesture": "hands relaxed or loosely holding a cup or notebook",
+        "emotion": "thoughtful, introspective",
+        "head_angle": "slightly down, gaze out of frame through window",
+        "eye_focus": "soft gaze into distance or reflections",
+        "stance": "seated or leaning against surface",
+        "movement": "minimal, still, gentle",
+    },
+    "confident_walk_forward": {
+        "body_orientation": "facing camera, walking forward",
+        "gesture": "arms relaxed, natural stride",
+        "emotion": "confident, purposeful",
+        "head_angle": "upright, chin slightly raised",
+        "eye_focus": "looking towards or just above camera",
+        "stance": "mid-step walk",
+        "movement": "clear sense of motion through frame",
+    },
+    "crowd_supporting_subject": {
+        "body_orientation": "subject facing camera, crowd behind or around",
+        "gesture": "subtle gesture such as holding instrument or raising hand",
+        "emotion": "uplifted, supported, connected",
+        "head_angle": "slightly up, open posture",
+        "eye_focus": "towards camera or slightly off",
+        "stance": "standing, centered among group",
+        "movement": "light movement from people around, subject more stable",
+    },
+}
+
+# ---------------------------------------------------------------------------
+# NEW: Mood presets – high-level tonal direction
+# ---------------------------------------------------------------------------
+
+MOOD_PRESETS: Dict[str, Dict[str, Any]] = {
+    "mv_melancholy_night": {
+        "tone": "melancholic, introspective, late-night city solitude",
+        "energy": "low, slow visual rhythm",
+        "contrast": "soft to medium contrast with gentle rolloff",
+    },
+    "mv_uplifting_rooftop": {
+        "tone": "warm, hopeful, communal celebration",
+        "energy": "medium-high, sense of connection and movement",
+        "contrast": "medium contrast, glowing highlights, rich midtones",
+    },
+    "mv_dreamlike_cafe": {
+        "tone": "dreamy, hazy, nostalgic interior calm",
+        "energy": "low to medium, drifting pace",
+        "contrast": "soft contrast with slight bloom in highlights",
+    },
+    "mv_high_energy_montage": {
+        "tone": "energetic, kinetic, performance-driven",
+        "energy": "high, quick visual rhythm",
+        "contrast": "higher contrast, crisp edges, saturated colors",
+    },
+}
+
+# ---------------------------------------------------------------------------
+# NEW: Material / texture presets – surfaces & microtexture
+# ---------------------------------------------------------------------------
+
+MATERIAL_PRESETS: Dict[str, Dict[str, Any]] = {
+    "neon_wet_city": {
+        "texture_intent": "wet reflective streets with pronounced specular highlights",
+        "specularity": "strong specular reflections on ground and metallic surfaces",
+        "microtexture_behavior": "soft skin textures, crisp environmental details",
+    },
+    "soft_skin_portrait": {
+        "texture_intent": "smooth, flattering skin with controlled pores",
+        "specularity": "soft sheen, minimal harsh shine",
+        "microtexture_behavior": "subtle grain, controlled fine detail on faces",
+    },
+    "gritty_urban": {
+        "texture_intent": "gritty textures on walls, pavement, and props",
+        "specularity": "mixed – matte walls with occasional wet or metal highlights",
+        "microtexture_behavior": "emphasized grain and roughness in environment",
+    },
+    "clean_modern_minimal": {
+        "texture_intent": "clean surfaces with limited texture noise",
+        "specularity": "controlled highlights, smooth reflections",
+        "microtexture_behavior": "low-grain, crisp edges, minimal clutter",
+    },
+}
+
 
 class FIBOBriaImageGenerator:
     """
@@ -107,7 +254,10 @@ class FIBOBriaImageGenerator:
       - image format
       - (optional) seed
       - (optional) HDR / bit-depth hints
-      - (optional) camera / lighting / film stock presets baked into FIBO
+      - (optional) camera / lighting / film stock presets
+      - (optional) composition & pose blueprints
+      - (optional) mood / intensity / material controls
+      - (optional) continuity metadata
 
     The goal is: all of our “pro controls” live inside the FIBO JSON
     that we send as `structured_prompt`. That keeps the workflow JSON-native
@@ -145,6 +295,45 @@ class FIBOBriaImageGenerator:
         self.default_height = default_height
         self.default_image_format = default_image_format
         self.default_sync = default_sync
+
+    # -------------------------------------------------------------------------
+    # Introspection helpers – for UI / debugging
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def available_camera_presets() -> Dict[str, Dict[str, Any]]:
+        """Return a copy of the camera presets dictionary."""
+        return dict(CAMERA_PRESETS)
+
+    @staticmethod
+    def available_lighting_blueprints() -> Dict[str, Dict[str, Any]]:
+        """Return a copy of the lighting blueprints dictionary."""
+        return dict(LIGHTING_BLUEPRINTS)
+
+    @staticmethod
+    def available_film_palettes() -> Dict[str, Dict[str, Any]]:
+        """Return a copy of the film stock / color palette presets."""
+        return dict(FILM_PALETTES)
+
+    @staticmethod
+    def available_composition_presets() -> Dict[str, Dict[str, Any]]:
+        """Return a copy of the composition presets."""
+        return dict(COMPOSITION_PRESETS)
+
+    @staticmethod
+    def available_pose_blueprints() -> Dict[str, Dict[str, Any]]:
+        """Return a copy of the pose blueprints."""
+        return dict(POSE_BLUEPRINTS)
+
+    @staticmethod
+    def available_mood_presets() -> Dict[str, Dict[str, Any]]:
+        """Return a copy of the high-level mood presets."""
+        return dict(MOOD_PRESETS)
+
+    @staticmethod
+    def available_material_presets() -> Dict[str, Dict[str, Any]]:
+        """Return a copy of the material / texture presets."""
+        return dict(MATERIAL_PRESETS)
 
     # -------------------------------------------------------------------------
     # Internal helpers – in-place FIBO JSON augmentation
@@ -317,6 +506,216 @@ class FIBOBriaImageGenerator:
         render_meta = fibo_payload.setdefault("_render_metadata", {})
         render_meta["film_palette"] = film_palette
 
+    # -------------------------------------------------------------------------
+    # NEW: Composition + pose + mood + intensity + material + continuity
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _apply_composition_preset(
+        fibo_payload: Dict[str, Any],
+        composition_preset: Optional[str],
+    ) -> None:
+        """
+        Map a composition preset into a dedicated 'composition' block.
+        """
+        if not composition_preset:
+            return
+
+        preset = COMPOSITION_PRESETS.get(composition_preset)
+        if not preset:
+            render_meta = fibo_payload.setdefault("_render_metadata", {})
+            render_meta.setdefault("unknown_composition_presets", []).append(composition_preset)
+            return
+
+        comp = fibo_payload.setdefault("composition", {})
+
+        def set_or_join(key: str, text: str) -> None:
+            base = comp.get(key, "")
+            comp[key] = FIBOBriaImageGenerator._join_phrases(base, text)
+
+        if preset.get("framing_style"):
+            set_or_join("framing_style", preset["framing_style"])
+        if preset.get("subject_placement"):
+            set_or_join("subject_placement", preset["subject_placement"])
+        if preset.get("depth_structure"):
+            set_or_join("depth_structure", preset["depth_structure"])
+        if preset.get("guiding_lines"):
+            set_or_join("guiding_lines", preset["guiding_lines"])
+        if preset.get("camera_height"):
+            set_or_join("camera_height", preset["camera_height"])
+        if preset.get("shot_size"):
+            set_or_join("shot_size", preset["shot_size"])
+
+        render_meta = fibo_payload.setdefault("_render_metadata", {})
+        render_meta["composition_preset"] = composition_preset
+
+    @staticmethod
+    def _apply_pose_preset(
+        fibo_payload: Dict[str, Any],
+        pose_preset: Optional[str],
+    ) -> None:
+        """
+        Map a pose blueprint into 'subject_pose' block – character acting controls.
+        """
+        if not pose_preset:
+            return
+
+        preset = POSE_BLUEPRINTS.get(pose_preset)
+        if not preset:
+            render_meta = fibo_payload.setdefault("_render_metadata", {})
+            render_meta.setdefault("unknown_pose_presets", []).append(pose_preset)
+            return
+
+        pose = fibo_payload.setdefault("subject_pose", {})
+
+        def set_if_present(key: str) -> None:
+            val = preset.get(key)
+            if val:
+                pose[key] = val
+
+        set_if_present("body_orientation")
+        set_if_present("gesture")
+        set_if_present("emotion")
+        set_if_present("head_angle")
+        set_if_present("eye_focus")
+        set_if_present("stance")
+        set_if_present("movement")
+
+        render_meta = fibo_payload.setdefault("_render_metadata", {})
+        render_meta["pose_preset"] = pose_preset
+
+    @staticmethod
+    def _apply_mood_preset(
+        fibo_payload: Dict[str, Any],
+        mood_preset: Optional[str],
+    ) -> None:
+        """
+        Map a high-level mood preset into aesthetics (tone, energy, contrast).
+        """
+        if not mood_preset:
+            return
+
+        preset = MOOD_PRESETS.get(mood_preset)
+        if not preset:
+            render_meta = fibo_payload.setdefault("_render_metadata", {})
+            render_meta.setdefault("unknown_mood_presets", []).append(mood_preset)
+            return
+
+        aesthetics = fibo_payload.setdefault("aesthetics", {})
+        existing_mood = aesthetics.get("mood_atmosphere", "")
+        existing_tone = aesthetics.get("tone_description", "")
+
+        tone_text = preset.get("tone", "")
+        energy_text = preset.get("energy", "")
+        contrast = preset.get("contrast", "")
+
+        aesthetics["mood_atmosphere"] = FIBOBriaImageGenerator._join_phrases(
+            existing_mood, tone_text
+        )
+        aesthetics["tone_description"] = FIBOBriaImageGenerator._join_phrases(
+            existing_tone, energy_text
+        )
+        if contrast:
+            aesthetics["mood_contrast_hint"] = contrast
+
+        render_meta = fibo_payload.setdefault("_render_metadata", {})
+        render_meta["mood_preset"] = mood_preset
+
+    @staticmethod
+    def _apply_intensity_controls(
+        fibo_payload: Dict[str, Any],
+        intensity_controls: Optional[Mapping[str, float]],
+    ) -> None:
+        """
+        Attach a normalized 0–1 intensity control block for downstream
+        tuning (sharpness, color grade, lighting, depth, etc.).
+        """
+        if not intensity_controls:
+            return
+
+        # Clamp to [0, 1] just in case
+        clamped: Dict[str, float] = {}
+        for k, v in intensity_controls.items():
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                continue
+            if f < 0.0:
+                f = 0.0
+            elif f > 1.0:
+                f = 1.0
+            clamped[k] = f
+
+        if not clamped:
+            return
+
+        fibo_payload["intensity_controls"] = clamped
+
+        render_meta = fibo_payload.setdefault("_render_metadata", {})
+        render_meta["intensity_controls_keys"] = sorted(list(clamped.keys()))
+
+    @staticmethod
+    def _apply_material_preset(
+        fibo_payload: Dict[str, Any],
+        material_preset: Optional[str],
+    ) -> None:
+        """
+        Encode material / texture behavior into a 'materials' block.
+        """
+        if not material_preset:
+            return
+
+        preset = MATERIAL_PRESETS.get(material_preset)
+        if not preset:
+            render_meta = fibo_payload.setdefault("_render_metadata", {})
+            render_meta.setdefault("unknown_material_presets", []).append(material_preset)
+            return
+
+        materials = fibo_payload.setdefault("materials", {})
+
+        def set_if_present(key: str) -> None:
+            val = preset.get(key)
+            if val:
+                materials[key] = val
+
+        set_if_present("texture_intent")
+        set_if_present("specularity")
+        set_if_present("microtexture_behavior")
+
+        render_meta = fibo_payload.setdefault("_render_metadata", {})
+        render_meta["material_preset"] = material_preset
+
+    @staticmethod
+    def _apply_continuity_tags(
+        fibo_payload: Dict[str, Any],
+        *,
+        continuity_character_id: Optional[str],
+        continuity_location_id: Optional[str],
+        continuity_shot_id: Optional[str],
+    ) -> None:
+        """
+        Store continuity IDs in a dedicated 'continuity' block so that
+        downstream tools (or future models) can reason about consistency
+        across shots and scenes.
+        """
+        if not (continuity_character_id or continuity_location_id or continuity_shot_id):
+            return
+
+        cont = fibo_payload.setdefault("continuity", {})
+        if continuity_character_id:
+            cont["character_id"] = continuity_character_id
+        if continuity_location_id:
+            cont["location_id"] = continuity_location_id
+        if continuity_shot_id:
+            cont["shot_id"] = continuity_shot_id
+
+        render_meta = fibo_payload.setdefault("_render_metadata", {})
+        render_meta["continuity"] = {
+            "character_id": continuity_character_id,
+            "location_id": continuity_location_id,
+            "shot_id": continuity_shot_id,
+        }
+
     @staticmethod
     def _join_phrases(
         a: str,
@@ -353,6 +752,20 @@ class FIBOBriaImageGenerator:
         scene_env: Optional[Dict[str, Any]] = None,
         # 4) Film stock palette
         film_palette: Optional[str] = None,
+        # 5) Composition preset
+        composition_preset: Optional[str] = None,
+        # 6) Pose blueprint
+        pose_preset: Optional[str] = None,
+        # 7) Mood preset
+        mood_preset: Optional[str] = None,
+        # 8) Intensity controls (normalized 0–1)
+        intensity_controls: Optional[Mapping[str, float]] = None,
+        # 9) Material preset
+        material_preset: Optional[str] = None,
+        # 10) Continuity IDs
+        continuity_character_id: Optional[str] = None,
+        continuity_location_id: Optional[str] = None,
+        continuity_shot_id: Optional[str] = None,
         # Existing rendering knobs
         width: Optional[int] = None,
         height: Optional[int] = None,
@@ -372,6 +785,15 @@ class FIBOBriaImageGenerator:
             scene_env: Optional scene environment dict
                 (e.g. {"time_of_day": "night", "weather": "rain", "setting": "city"}).
             film_palette: Optional key into FILM_PALETTES.
+            composition_preset: Optional key into COMPOSITION_PRESETS.
+            pose_preset: Optional key into POSE_BLUEPRINTS.
+            mood_preset: Optional key into MOOD_PRESETS.
+            intensity_controls: Optional mapping of normalized intensities
+                (e.g. {"sharpness": 0.7, "color_grade": 0.5}).
+            material_preset: Optional key into MATERIAL_PRESETS.
+            continuity_character_id: Optional ID tying this shot to a character.
+            continuity_location_id: Optional ID for location continuity.
+            continuity_shot_id: Optional ID for shot/beat continuity.
             width: Optional override for output width.
             height: Optional override for output height.
             image_format: "png" or "jpeg".
@@ -396,6 +818,17 @@ class FIBOBriaImageGenerator:
             scene_env=scene_env,
         )
         self._apply_film_palette(fibo_payload, film_palette=film_palette)
+        self._apply_composition_preset(fibo_payload, composition_preset=composition_preset)
+        self._apply_pose_preset(fibo_payload, pose_preset=pose_preset)
+        self._apply_mood_preset(fibo_payload, mood_preset=mood_preset)
+        self._apply_intensity_controls(fibo_payload, intensity_controls=intensity_controls)
+        self._apply_material_preset(fibo_payload, material_preset=material_preset)
+        self._apply_continuity_tags(
+            fibo_payload,
+            continuity_character_id=continuity_character_id,
+            continuity_location_id=continuity_location_id,
+            continuity_shot_id=continuity_shot_id,
+        )
 
         # Also record target resolution and format in render metadata
         render_meta = fibo_payload.setdefault("_render_metadata", {})

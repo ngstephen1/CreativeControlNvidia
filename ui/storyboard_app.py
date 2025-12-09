@@ -12,6 +12,7 @@ from datetime import datetime
 import requests
 import streamlit as st
 from dotenv import load_dotenv
+from PIL import Image, ImageDraw  # NEW: for composition overlays
 
 # -------------------------------------------------
 # Bootstrap: paths + env
@@ -137,6 +138,142 @@ def _bria_edit_call(endpoint: str, payload: Dict[str, Any]) -> str:
     return _download_image_to_path(image_url, ASSETS_DIR, endpoint)
 
 
+def _create_composition_grid(image_path: str, shot_id: str) -> str:
+    """Create a rule-of-thirds composition overlay for the given image.
+
+    Saves a new PNG with grid lines into ASSETS_DIR and returns its path.
+    """
+    try:
+        img = Image.open(image_path).convert("RGBA")
+    except Exception as e:
+        raise RuntimeError(f"Failed to open image for composition grid: {e}")
+
+    w, h = img.size
+    overlay = img.copy()
+    draw = ImageDraw.Draw(overlay)
+
+    # Rule-of-thirds positions
+    v1 = w / 3
+    v2 = 2 * w / 3
+    h1 = h / 3
+    h2 = 2 * h / 3
+
+    # Semi-transparent white lines
+    line_color = (255, 255, 255, 180)
+    line_width = max(1, int(min(w, h) * 0.0025))
+
+    # Vertical lines
+    draw.line([(v1, 0), (v1, h)], fill=line_color, width=line_width)
+    draw.line([(v2, 0), (v2, h)], fill=line_color, width=line_width)
+    # Horizontal lines
+    draw.line([(0, h1), (w, h1)], fill=line_color, width=line_width)
+    draw.line([(0, h2), (w, h2)], fill=line_color, width=line_width)
+
+    out_name = f"shot_{shot_id}_composition_grid.png"
+    out_path = ASSETS_DIR / out_name
+    overlay.save(out_path, format="PNG")
+    return str(out_path)
+
+
+def build_directors_commentary(result: Dict[str, Any]) -> str:
+    """Generate a human-readable 'director's commentary' style summary
+    of the storyboard, using existing structured data.
+    """
+    shots: List[Dict[str, Any]] = result.get("shots", [])
+    fibo_payloads: List[Dict[str, Any]] = result.get("fibo_payloads", [])
+
+    if not shots:
+        return "No shots available yet – generate a storyboard first."
+
+    # Build lookup for FIBO JSON by shot_id
+    fibo_by_shot: Dict[str, Dict[str, Any]] = {}
+    for fp in fibo_payloads:
+        sid = str(fp.get("shot_id", "UNKNOWN"))
+        fibo_by_shot[sid] = fp.get("fibo_json", {})
+
+    # Aggregate per scene
+    scenes: Dict[int, Dict[str, Any]] = {}
+    for shot in shots:
+        scene_id = int(shot.get("scene", 1))
+        sid = str(shot.get("shot_id", "UNKNOWN"))
+        fibo = fibo_by_shot.get(sid, {})
+
+        env = shot.get("environment", {})
+        pc = fibo.get("photographic_characteristics", {})
+        aesth = fibo.get("aesthetics", {})
+
+        scenes.setdefault(scene_id, {
+            "shots": [],
+            "lighting": set(),
+            "film_stocks": set(),
+            "hdr_modes": set(),
+            "camera_angles": set(),
+            "moods": set(),
+            "color_schemes": set(),
+            "locations": set(),
+        })
+
+        s = scenes[scene_id]
+        s["shots"].append(shot)
+        if "lighting_blueprint" in fibo:
+            s["lighting"].add(fibo.get("lighting_blueprint"))
+        if "film_stock" in fibo:
+            s["film_stocks"].add(fibo.get("film_stock"))
+        if "hdr_mode" in fibo:
+            s["hdr_modes"].add(fibo.get("hdr_mode"))
+        if pc.get("camera_angle"):
+            s["camera_angles"].add(pc.get("camera_angle"))
+        if aesth.get("mood_atmosphere"):
+            s["moods"].add(aesth.get("mood_atmosphere"))
+        if aesth.get("color_scheme"):
+            s["color_schemes"].add(aesth.get("color_scheme"))
+        if env.get("location"):
+            s["locations"].add(env.get("location"))
+
+    lines: List[str] = []
+    lines.append(
+        "This music video is structured as a sequence of carefully controlled scenes, "
+        "with FIBO governing camera language, lighting, and color so the look stays consistent from shot to shot.\n"
+    )
+
+    for scene_id in sorted(scenes.keys()):
+        s = scenes[scene_id]
+        shots_list = s["shots"]
+        num_shots = len(shots_list)
+
+        lighting = ", ".join(sorted(x for x in s["lighting"] if x)) or "default studio-style lighting"
+        film = ", ".join(sorted(x for x in s["film_stocks"] if x)) or "no explicit film stock (neutral digital look)"
+        hdr = ", ".join(sorted(x for x in s["hdr_modes"] if x)) or "standard dynamic range"
+        angles = ", ".join(sorted(x for x in s["camera_angles"] if x)) or "mostly eye-level framing"
+        moods = ", ".join(sorted(x for x in s["moods"] if x)) or "cinematic but understated mood"
+        colors = ", ".join(sorted(x for x in s["color_schemes"] if x)) or "balanced color palette"
+        locations = ", ".join(sorted(x for x in s["locations"] if x)) or "implied city locations"
+
+        lines.append(f"Scene {scene_id}:")
+        lines.append(
+            f"- We use {num_shots} shot(s) to tell this moment, leaning on {angles} to shape the emotional perspective."
+        )
+        lines.append(
+            f"- The lighting blueprint leans toward **{lighting}**, which keeps the subject readable while shaping depth and atmosphere."
+        )
+        lines.append(
+            f"- Color is guided by **{colors}**, and film look is steered by **{film}**, which gives a cohesive treatment across the scene."
+        )
+        lines.append(
+            f"- HDR pipeline mode is **{hdr}**, chosen to balance highlight detail against a strong, musical contrast."
+        )
+        lines.append(
+            f"- Overall mood here is **{moods}**, anchored in the recurring sense of place: **{locations}**.\n"
+        )
+
+    lines.append(
+        "Across the full storyboard, FIBO gives us JSON-level control over lens, angle, color and lighting. "
+        "That means we can regenerate individual shots without losing the overall look of the video."
+    )
+
+    return "\n".join(lines)
+
+
 # -------------------------------------------------
 # Multi-agent storyboard pipeline
 # -------------------------------------------------
@@ -215,7 +352,7 @@ def build_video_plan(result: Dict[str, Any], video_backend: str) -> Dict[str, An
                 "scene": shot.get("scene"),
                 "shot_id": shot.get("shot_id"),
                 "description": shot.get("description"),
-                "duration_sec": float(shot.get("duration_sec", 4.0)),
+                "duration_sec": float(shot.get("duration_sec", 2.0)),
                 "motion_style": shot.get(
                     "motion_style", "slow_cinematic_push_in"
                 ),
@@ -254,13 +391,13 @@ def main() -> None:
     with col_left:
         st.subheader("Script")
         default_script = (
-            "Scene 1: Night rain on the city. A single violinist plays under a street lamp while cars pass in the distance.\n\n"
-            "Scene 2: Closer shot of the violinist’s face, eyes closed, raindrops on the instrument, soft neon reflections in the puddles.\n\n"
-            "Scene 3: The next morning, the violinist rides a tram through the city, watching the world pass by the window in slow motion.\n\n"
-            "Scene 4: Inside a quiet cafe, the violinist sits by the window, notebook open, sketching music ideas on paper.\n\n"
-            "Scene 5: Evening rooftop performance with a small crowd gathered, string lights overhead, city skyline in the background.\n\n"
-            "Scene 6: Montage of hands on strings, city lights blurring in bokeh, silhouettes walking in the rain, and the violinist smiling at the camera.\n\n"
-            "Scene 7: Final wide shot of the city at blue hour, the violinist standing on a bridge, music echoing as cars stream by in light trails."
+    "Scene 1: Night rain on the city. A young Asian male violinist in his mid-20s, with medium-length black hair tucked behind his ears, warm brown eyes, a slim calm face, wearing a dark navy coat and a charcoal grey scarf, holding a worn reddish-brown wooden violin, plays under a street lamp while cars pass in the distance.\n\n"
+    "Scene 2: Closer shot of the same young Asian male violinist in his mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf, holding the same reddish-brown violin. His eyes are closed, raindrops fall onto the instrument, and neon reflections shimmer in puddles beneath him.\n\n"
+    "Scene 3: The next morning, the young Asian male violinist (mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf) rides a tram through the city with his reddish-brown violin resting beside him, watching the world pass by the window in slow motion.\n\n"
+    "Scene 4: Inside a quiet cafe, the young Asian male violinist (mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf) sits by a fogged window with his reddish-brown violin, notebook open, sketching new music ideas.\n\n"
+    "Scene 5: Evening rooftop performance. The young Asian male violinist (mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf) plays his reddish-brown violin for a small crowd under warm string lights, with the glowing city skyline behind him.\n\n"
+    "Scene 6: Montage of the young Asian male violinist (mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf) and his reddish-brown violin: close-ups of his hands on the strings, blurred city lights, silhouettes walking in the rain, and a gentle smile toward the camera.\n\n"
+    "Scene 7: Final wide shot at blue hour. The young Asian male violinist (mid-20s, medium-length black hair behind his ears, warm brown eyes, slim face, navy coat, grey scarf) stands on a bridge holding his reddish-brown violin, music echoing as cars below form light trails."
         )
         script_text = st.text_area(
             "Paste your scene description or multi-scene script:",
@@ -341,21 +478,24 @@ def main() -> None:
     images = result["generated_images"]
     fibo_payloads = result["fibo_payloads"]
 
-    # Map shot_id -> path for the Shot Asset Lab
+    # Map shot_id -> path / fibo for Shot Asset Lab & continuity inspector
     shot_id_to_image_path: Dict[str, str] = {}
+    shot_id_to_fibo: Dict[str, Dict[str, Any]] = {}
 
     for shot, img_meta, fibo_payload in zip(shots, images, fibo_payloads):
         shot_id = shot.get("shot_id")
         scene_id = shot.get("scene")
         if shot_id is None:
             continue
-        shot_id_to_image_path[shot_id] = img_meta["image_path"]
+        shot_id_str = str(shot_id)
+        shot_id_to_image_path[shot_id_str] = img_meta["image_path"]
+        shot_id_to_fibo[shot_id_str] = fibo_payload["fibo_json"]
 
         st.markdown(f"### Scene {scene_id} – Shot {shot_id}")
 
         cols = st.columns([2, 3])
 
-        # Left: original image + rendered clip preview
+        # Left: original image + rendered clip preview + composition overlay
         with cols[0]:
             img_path = img_meta["image_path"]
             if os.path.exists(img_path):
@@ -363,8 +503,30 @@ def main() -> None:
             else:
                 st.warning(f"Image not found: {img_path}")
 
+            # NEW: Composition grid overlay (rule-of-thirds)
+            show_grid = st.checkbox(
+                "Show composition grid overlay",
+                key=f"comp_grid_toggle_{shot_id_str}",
+            )
+            if show_grid and os.path.exists(img_path):
+                grid_key = f"comp_grid_path_{shot_id_str}"
+                grid_path = st.session_state.get(grid_key)
+                if not grid_path or not os.path.exists(grid_path):
+                    try:
+                        grid_path = _create_composition_grid(img_path, shot_id_str)
+                        st.session_state[grid_key] = grid_path
+                    except Exception as e:
+                        st.error(f"Failed to create composition grid: {e}")
+                        grid_path = None
+                if grid_path and os.path.exists(grid_path):
+                    st.image(
+                        grid_path,
+                        use_container_width=True,
+                        caption="Composition (rule-of-thirds overlay)",
+                    )
+
             # Rendered clip preview (if available)
-            clip_path = _find_clip_for_shot(scene_id, shot_id)
+            clip_path = _find_clip_for_shot(scene_id, shot_id_str)
             if clip_path and os.path.exists(clip_path):
                 st.markdown("**Rendered clip**")
                 st.video(str(clip_path))
@@ -376,9 +538,9 @@ def main() -> None:
             # Allow sending this shot into Shot Asset Lab
             if st.button(
                 "🧪 Send to Shot Asset Lab",
-                key=f"send_to_lab_{shot_id}",
+                key=f"send_to_lab_{shot_id_str}",
             ):
-                st.session_state["asset_lab_shot_id"] = shot_id
+                st.session_state["asset_lab_shot_id"] = shot_id_str
                 st.session_state["asset_lab_image_path"] = img_path
                 st.info(f"Shot {shot_id} sent to Shot Asset Lab (below).")
 
@@ -395,7 +557,7 @@ def main() -> None:
 
             # 🎵 Music Video settings per shot (duration & motion style)
             with st.expander("🎵 Music Video Settings"):
-                current_duration = float(shot.get("duration_sec", 4.0))
+                current_duration = float(shot.get("duration_sec", 2.0))
                 current_motion = shot.get(
                     "motion_style", "slow_cinematic_push_in"
                 )
@@ -406,7 +568,7 @@ def main() -> None:
                     max_value=12.0,
                     value=current_duration,
                     step=0.5,
-                    key=f"dur_{shot_id}",
+                    key=f"dur_{shot_id_str}",
                 )
 
                 new_motion = st.selectbox(
@@ -434,7 +596,7 @@ def main() -> None:
                         "static_camera_subtle_motion",
                     ]
                     else 0,
-                    key=f"motion_{shot_id}",
+                    key=f"motion_{shot_id_str}",
                 )
 
                 # Persist back into shot dict (so export + QC see updated values)
@@ -446,12 +608,16 @@ def main() -> None:
                     "(SVD, LongCat, etc.) to generate consistent clips."
                 )
 
+            fibo_payload = next(
+                (fp for fp in fibo_payloads if fp["shot_id"] == shot_id), None
+            ) or {"fibo_json": {}}
+
             with st.expander("FIBO StructuredPrompt JSON (original)"):
                 st.json(fibo_payload["fibo_json"])
 
             # 🎛 Controllability panel – structured JSON tweaks
             with st.expander("🎛 Tweak & Regenerate this shot"):
-                with st.form(f"regen_form_{shot_id}"):
+                with st.form(f"regen_form_{shot_id_str}"):
                     original_fibo = fibo_payload["fibo_json"]
                     pc = original_fibo.get("photographic_characteristics", {})
                     aesth = original_fibo.get("aesthetics", {})
@@ -478,12 +644,12 @@ def main() -> None:
                         else angle_options.index("eye-level")
                     )
 
-                    # 🔑 unique keys per shot for these three selectboxes
+                    # 🔑 unique keys per shot for these widgets
                     new_angle = st.selectbox(
                         "Camera angle",
                         angle_options,
                         index=angle_index,
-                        key=f"regen_angle_{shot_id}",
+                        key=f"regen_angle_{shot_id_str}",
                     )
 
                     new_mood = st.selectbox(
@@ -511,7 +677,7 @@ def main() -> None:
                             "energetic, dynamic atmosphere",
                         ]
                         else 0,
-                        key=f"regen_mood_{shot_id}",
+                        key=f"regen_mood_{shot_id_str}",
                     )
 
                     new_colors = st.selectbox(
@@ -536,7 +702,7 @@ def main() -> None:
                             "high-contrast noir with deep shadows",
                         ]
                         else 0,
-                        key=f"regen_colors_{shot_id}",
+                        key=f"regen_colors_{shot_id_str}",
                     )
 
                     # --- HDR / 16-bit toggle ---
@@ -548,7 +714,7 @@ def main() -> None:
                         index=hdr_options.index(hdr_mode_current)
                         if hdr_mode_current in hdr_options
                         else 0,
-                        key=f"regen_hdr_{shot_id}",
+                        key=f"regen_hdr_{shot_id_str}",
                     )
 
                     # --- Lighting blueprint presets ---
@@ -568,7 +734,7 @@ def main() -> None:
                         index=lighting_presets.index(lighting_current)
                         if lighting_current in lighting_presets
                         else 0,
-                        key=f"regen_light_{shot_id}",
+                        key=f"regen_light_{shot_id_str}",
                     )
 
                     # --- Film stock color palettes ---
@@ -585,13 +751,14 @@ def main() -> None:
                         index=film_stocks.index(film_current)
                         if film_current in film_stocks
                         else 0,
-                        key=f"regen_film_{shot_id}",
+                        key=f"regen_film_{shot_id_str}",
                     )
 
                     submitted = st.form_submit_button("🔁 Regenerate this shot")
 
                 if submitted:
                     with st.spinner("Re-generating shot with updated parameters…"):
+                        # Start from original, then apply UI changes
                         modified_fibo = copy.deepcopy(original_fibo)
                         modified_fibo.setdefault(
                             "photographic_characteristics", {}
@@ -606,11 +773,29 @@ def main() -> None:
                         modified_fibo["lighting_blueprint"] = lighting_blueprint
                         modified_fibo["film_stock"] = film_stock
 
+                        # Generate a new image using the updated FIBO JSON
                         new_img_path = (
                             fibo_image_generator.generate_image_from_fibo_json(
                                 modified_fibo
                             )
                         )
+
+                    # ✅ Persist FIBO + image back into the storyboard model
+                    # Update this shot's FIBO payload
+                    fibo_payload["fibo_json"] = modified_fibo
+                    shot_id_to_fibo[shot_id_str] = modified_fibo
+
+                    # Update the generated_images entry for this shot
+                    for img_meta in result["generated_images"]:
+                        img_shot_id = str(img_meta.get("shot_id", img_meta.get("shot_id", "")))
+                        if img_shot_id == shot_id_str:
+                            img_meta["image_path"] = new_img_path
+
+                    # Also refresh in-memory lookup so downstream panels see the new image
+                    shot_id_to_image_path[shot_id_str] = new_img_path
+
+                    # Store updated storyboard back into session state so the next rerun reflects changes
+                    st.session_state["storyboard"] = result
 
                     st.success("Shot re-generated!")
 
@@ -643,6 +828,52 @@ def main() -> None:
 
     st.markdown("**Reviewer summary:**")
     st.json(result["review"])
+
+    # ========================
+    # NEW: Director’s Commentary
+    # ========================
+    st.markdown("---")
+    st.subheader("🎙 Director’s Commentary")
+    with st.expander("Show director-style explanation of visual choices", expanded=True):
+        commentary = build_directors_commentary(result)
+        st.write(commentary)
+
+    # ========================
+    # NEW: Continuity Inspector
+    # ========================
+    st.subheader("🔁 Continuity Inspector")
+    st.caption(
+        "Visual overview of camera, lighting, color and film-stock continuity across scenes and shots."
+    )
+
+    continuity_rows: List[Dict[str, Any]] = []
+    for shot in shots:
+        shot_id_str = str(shot.get("shot_id", "UNKNOWN"))
+        scene_id = shot.get("scene", "?")
+        fibo = shot_id_to_fibo.get(shot_id_str, {})
+        pc = fibo.get("photographic_characteristics", {})
+        aesth = fibo.get("aesthetics", {})
+        env = shot.get("environment", {})
+
+        continuity_rows.append(
+            {
+                "Scene": scene_id,
+                "Shot": shot_id_str,
+                "Camera angle": pc.get("camera_angle", ""),
+                "Lens / FOV": pc.get("lens_focal_length", ""),
+                "HDR mode": fibo.get("hdr_mode", "off"),
+                "Lighting blueprint": fibo.get("lighting_blueprint", "default"),
+                "Film stock": fibo.get("film_stock", "none"),
+                "Mood": aesth.get("mood_atmosphere", ""),
+                "Color scheme": aesth.get("color_scheme", ""),
+                "Location": env.get("location", ""),
+            }
+        )
+
+    if continuity_rows:
+        st.dataframe(continuity_rows, hide_index=True)
+    else:
+        st.write("No continuity data available yet – generate a storyboard first.")
 
     # -------------------------------------------------
     # Music Video export: mv_video_plan.json
