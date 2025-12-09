@@ -3,7 +3,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Streamlit-UI-ff4b4b?logo=streamlit&logoColor=white">
-  <img src="https://img.shields.io/badge/FIBO-Structured%20Images-f39c12">
+  <img src="https://img.shields.io/badge/FIBO-AI%20Images-f39c12">
   <img src="https://img.shields.io/badge/LongCat-Video%20Gen-4a90e2">
   <img src="https://img.shields.io/badge/NVIDIA-Optimized-76b900?logo=nvidia&logoColor=white">
   <img src="https://img.shields.io/badge/Google_Gemini-2.5_Pro-4285F4?logo=google&logoColor=white">
