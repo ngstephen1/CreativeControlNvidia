@@ -4,20 +4,24 @@ pydantic
 python-dotenv
 httpx
 
-# For agents / orchestration
+# Agents / orchestration
 google-genai
 tiktoken
 
-# For JSON diffing and validation
+# JSON diffing and validation
 jsonschema
 deepdiff
 
-# For simple UI (fastest MVP path)
+# UI
 streamlit
 
-# Optional: image handling & plotting
+# Image + video handling
 Pillow
 matplotlib
-
-fal-client
 moviepy
+
+# fal.ai client
+fal-client
+
+# Needed if you ever POST file uploads to FastAPI
+python-multipart
